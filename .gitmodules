@@ -18,4 +18,10 @@
 	url = https://github.com/g-truc/glm.git
 [submodule "external/tiny-cuda-nn"]
 	path = external/tiny-cuda-nn
-	url = https://gitlab-master.nvidia.com/tmueller/tiny-cuda-nn.git
+	url = https://github.com/NVlabs/tiny-cuda-nn.git
+[submodule "external/json"]
+	path = external/json
+	url = https://github.com/nlohmann/json.git
+[submodule "external/pybind11_json"]
+	path = external/pybind11_json
+	url = https://github.com/pybind/pybind11_json.git
