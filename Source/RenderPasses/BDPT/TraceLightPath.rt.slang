@@ -159,37 +159,15 @@ struct Scheduler
     {
         PathState path = {};
 
-        gPathTracer.generatePath(pathID, path);
+        //sample initial ray for light subpath
+        gPathTracer.generateLightPath(pathID, path);
         gPathTracer.setupPathLogging(path);
-
-        // Handle primary hit/miss.
-        if (path.isHit())
-        {
-#if defined(DELTA_REFLECTION_PASS)
-            gPathTracer.handleDeltaReflectionHit(path);
-#elif defined(DELTA_TRANSMISSION_PASS)
-            gPathTracer.handleDeltaTransmissionHit(path);
-#else
-            VisibilityQuery vq;
-            gPathTracer.handleHit(path, vq);
-#endif
-        }
-        else
-        {
-            // Note the primary miss has already been handled by the separate path generation pass
-            // the path tracer runs first. Abort execution here to avoid double work.
-            return;
-        }
 
         // Trace path.
         while (path.isActive())
         {
             nextHit(path);
         }
-
-#if !defined(DELTA_REFLECTION_PASS) && !defined(DELTA_TRANSMISSION_PASS)
-        gPathTracer.writeOutput(path);
-#endif
     }
 
     /** Runs the path tracer for a single pixel.
@@ -198,7 +176,7 @@ struct Scheduler
     void run(uint2 pixel)
     {
         // Determine number of samples to take.
-        uint samplesRemaining = kSamplesPerPixel;
+        uint samplesRemaining = kLightSubpathPerThread;
         
         // Loop over samples.
         while (samplesRemaining > 0)

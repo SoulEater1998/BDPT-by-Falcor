@@ -42,6 +42,19 @@ import ColorType;
 __exported import PathState;
 __exported import Params;
 
+inline void CoordinateSystem(const float3 v1, out float3 v2, out float3 v3)
+{
+    if(abs(v1.x) > abs(v1.y))
+    {
+        v2 = float3(-v1.z, 0.f, v1.x) / sqrt(v1.x * v1.x + v1.z * v1.z);
+    }
+    else
+    {
+        v2 = float3(0.f, v1.z, -v1.y) / sqrt(v1.y * v1.y + v1.z * v1.z);
+    }
+    v3 = cross(v1, v2);
+}
+
 /** Path tracer.
 
     This implements the high-level path tracing logic and is shared among
@@ -222,6 +235,29 @@ struct PathTracer
             path.setHit(hit);
             path.setVertexIndex(1);
         }
+    }
+
+    /** Generate the first vertex of the light subpath
+        \param[in] pathID Path ID which encodes pixel and sample index.
+        \param[out] path Path state for the primary hit.
+    */
+    void generateLightPath(const uint pathID, out PathState path)
+    {
+        //intial path state
+        path = {}
+        path.setActive();
+        path.id = pathID;
+
+        const uint2 pixel = path.getPixel();
+        const uint maxSpp = kSamplesPerPixel > 0 ? kSamplesPerPixel : kMaxSamplesPerPixel;
+        path.sg = SampleGenerator(pixel, params.seed * maxSpp + path.getSampleIdx());
+
+        //Sample a point on Lights
+        uint lightType;
+        float selectionPdf;
+        if (!selectLightType(lightType, selectionPdf, sg)) return false;
+
+
     }
 
     /** Set up path for logging and debugging.
@@ -442,6 +478,55 @@ struct PathTracer
         return any(ls.Li > 0.f);
     }
 
+    /** Generates a light sample on the emissive geometry for BDPT.
+        \param[in,out] sg Sample generator.
+        \param[out] ls Struct describing valid samples.
+        \return True if the sample is valid and has nonzero contribution, false otherwise.
+    */
+    bool generateEmissiveSample_BDPT(inout SampleGenerator sg, out LightVertex lv)
+    {
+        lv = {}; // Default initialization to avoid divergence at returns.
+        if (!kUseEmissiveLights) return false;
+
+        //sample the lights uniformly.
+        float uLight = sampleNext1D(sg);
+        uint triangleCount = gScene.lightCollection.getActiveTriangleCount();
+        uint idx = min((uint)(uLight * triangleCount), triangleCount - 1); // Safety precaution as the result of the multiplication may be rounded to triangleCount even if uLight < 1.0 when triangleCount is large.
+        uint triangleIndex = gScene.lightCollection.activeTriangles[idx];
+        float triangleSelectionPdf = 1.f / (float)triangleCount;
+
+        //sample the triangle uniformly.
+        float2 u = sampleNext2D(sg);
+        const float3 barycentrics = sample_triangle(u);
+        const EmissiveTriangle tri = gScene.lightCollection.getTriangle(triangleIndex);
+        float3 pos = tri.getPosition(barycentrics);
+        float3 normal = tri.normal
+        float2 uv = tri.getTexCoord(barycentrics);
+        float3 Le = gScene.materials.evalEmissive(tri.materialID, uv);  
+
+        float denom = max(FLT_MIN, tri.area);
+        float posPdf = 1.f / denom;
+
+        //sample a cosine-weighted outgoing direction w.  
+        float2 v = sampleNext2D(sg);
+        float dirPdf;
+        float3 w = sample_cosine_hemisphere_polar(v, dirPdf);
+        float3 v2, v3;
+        CoordinateSystem(normal, v2, v3);
+        w = w.x * v2 + w.y * v3 + w.z * n; //ray direction
+
+        if(posPdf <= 0.f || dirPdf <= 0.f || all(Le) <= 0.f) return flase;
+
+        // Setup returned sample.
+        lv.beta = Le * abs(dot(normal, w)) / (triangleSelectionPdf * posPdf * dirPdf); //the "beta" of the subpath
+        lv.pdfFwd = triangleSelectionPdf * posPdf;
+        lv.type = VertexType::Light;
+        lv.normal = normal;
+        lv.pos = pos;
+
+        return any(lv.beta > 0.f);
+    }
+
     /** Generates a light sample on the analytic lights.
         \param[in] vertex Path vertex.
         \param[in,out] sg Sample generator.
@@ -449,6 +534,39 @@ struct PathTracer
         \return True if the sample is valid and has nonzero contribution, false otherwise.
     */
     bool generateAnalyticLightSample(const PathVertex vertex, inout SampleGenerator sg, out LightSample ls)
+    {
+        ls = {}; // Default initialization to avoid divergence at returns.
+
+        uint lightCount = gScene.getLightCount();
+        if (!kUseAnalyticLights || lightCount == 0) return false;
+
+        // Sample analytic light source selected uniformly from the light list.
+        // TODO: Sample based on estimated contributions as pdf.
+        uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
+
+        // Sample local light source.
+        AnalyticLightSample lightSample;
+        if (!sampleLight(vertex.pos, gScene.getLight(lightIndex), sg, lightSample)) return false;
+
+        // Setup returned sample.
+        ls.pdf = lightSample.pdf / lightCount;
+        ls.Li = lightSample.Li * lightCount;
+        // Offset shading position to avoid self-intersection.
+        ls.origin = vertex.getRayOrigin(lightSample.dir);
+        // Analytic lights do not currently have a geometric representation in the scene.
+        // Do not worry about adjusting the ray length to avoid self-intersections at the light.
+        ls.distance = lightSample.distance;
+        ls.dir = lightSample.dir;
+
+        return any(ls.Li > 0.f);
+    }
+
+    /** Generates a light sample on the analytic lights for BDPT.
+        \param[in,out] sg Sample generator.
+        \param[out] lv Struct describing valid samples.
+        \return True if the sample is valid and has nonzero contribution, false otherwise.
+    */
+    bool generateAnalyticLightSample(inout SampleGenerator sg, out LightVertex lv)
     {
         ls = {}; // Default initialization to avoid divergence at returns.
 
@@ -554,6 +672,50 @@ struct PathTracer
             // Emissive light samplers have an option to exclusively sample the upper hemisphere.
             bool upperHemisphere = sampleUpperHemisphere && !sampleLowerHemisphere;
             valid = generateEmissiveSample(vertex, upperHemisphere, sg, ls);
+        }
+        if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
+        {
+            valid = generateAnalyticLightSample(vertex, sg, ls);
+        }
+        if (!valid) return false;
+
+        // Reject samples in non-requested hemispheres.
+        float cosTheta = dot(vertex.normal, ls.dir);
+        // Flip the face normal to point in the same hemisphere as the shading normal.
+        float3 faceNormal = sign(dot(vertex.normal, vertex.faceNormal)) * vertex.faceNormal;
+        float cosThetaFace = dot(faceNormal, ls.dir);
+        if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) return false;
+        if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) return false;
+
+        // Account for light type selection.
+        ls.lightType = lightType;
+        ls.pdf *= selectionPdf;
+        ls.Li /= selectionPdf;
+
+        return true;
+    }
+
+    /** Samples a light source in the scene for BDPT.
+        This function first stochastically selects a type of light source to sample,
+        and then calls that the sampling function for the chosen light type.
+        \param[in,out] sg Sample generator.
+        \param[out] lv Struct describing valid samples vertex.
+        \return True if the sample is valid and has nonzero contribution, false otherwise.
+    */
+    bool generateLightSample_BDPT(inout SampleGenerator sg, out LightVertex lv)
+    {
+        lv = {};
+
+        uint lightType;
+        float selectionPdf;
+        if (!selectLightType(lightType, selectionPdf, sg)) return false;
+
+        bool valid = false;
+        if (kUseEnvLight && lightType == (uint)LightType::EnvMap) valid = false;
+        if (kUseEmissiveLights && lightType == (uint)LightType::Emissive)
+        {
+            // Emissive light samplers have an option to exclusively sample the upper hemisphere.
+            valid = generateEmissiveSample_BDPT(sg, lv);
         }
         if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
         {
@@ -920,51 +1082,9 @@ struct PathTracer
             float3 Le = envMapSampler.eval(path.dir);
             emitterRadiance = misWeight * Le;
             addToPathContribution(path, emitterRadiance);
-/*
-            if (kOutputGuideData && path.getVertexIndex() == 2
-                && (path.getBounces(BounceType::Specular) == 1
-                || path.getBounces(BounceType::Transmission) == 1))
-            {
-                // Compress dynamic range similar to UE4.
-                float3 compressedColor = pow(Le / (Le + 1.0f), 0.454545f);
-                path.guideData.setIndirectAlbedo(compressedColor);
-                path.guideData.setReflectionPos(path.dir * kEnvMapDepth);
-            }
-*/
-        }
-/*
-        if (kOutputGuideData && path.getVertexIndex() == 1)
-        {
-            path.guideData.setNormal(-path.dir);
+
         }
 
-        if (kOutputNRDData)
-        {
-            const uint outSampleIdx = params.getSampleOffset(path.getPixel(), sampleOffset) + path.getSampleIdx();
-            setNRDSampleHitDist(outputNRD, path, outSampleIdx);
-        }
-    
-
-#if defined(DELTA_REFLECTION_PASS)
-        if (path.isDeltaReflectionPrimaryHit())
-        {
-            writeNRDDeltaReflectionGuideBuffers(outputNRD, kUseNRDDemodulation, path.getPixel(), 0.f, path.thp * emitterRadiance, -path.dir, 0.f, kNRDInvalidPathLength, kNRDInvalidPathLength);
-        }
-        else
-        {
-            writeNRDDeltaReflectionGuideBuffers(outputNRD, kUseNRDDemodulation, path.getPixel(), 0.f, 0.f, -path.dir, 0.f, kNRDInvalidPathLength, kNRDInvalidPathLength);
-        }
-#elif defined(DELTA_TRANSMISSION_PASS)
-        if (path.isDeltaTransmissionPath())
-        {
-            writeNRDDeltaTransmissionGuideBuffers(outputNRD, kUseNRDDemodulation, path.getPixel(), 0.f, path.thp * emitterRadiance, -path.dir, 0.f, kNRDInvalidPathLength, path.origin + path.dir * kNRDInvalidPathLength);
-        }
-        else
-        {
-            writeNRDDeltaTransmissionGuideBuffers(outputNRD, kUseNRDDemodulation, path.getPixel(), 0.f, 0.f, -path.dir, 0.f, kNRDInvalidPathLength, 0.f);
-        }
-#endif
-*/
         path.terminate();
     }
 
@@ -990,27 +1110,5 @@ struct PathTracer
             // Write color to per-sample buffer.
             sampleColor[outIdx].set(path.L);
         }
-/*
-        if (kOutputGuideData)
-        {
-            sampleGuideData[outIdx] = path.guideData;
-        }
-
-        if (kOutputNRDData)
-        {
-            // TODO: Optimize this for 1 SPP. It doesn't have to go through resolve pass like the color above.
-            NRDRadiance data = {};
-
-            if (path.isDiffusePrimaryHit()) data.setPathType(NRDPathType::Diffuse);
-            else if (path.isSpecularPrimaryHit()) data.setPathType(NRDPathType::Specular);
-            else if (path.isDeltaReflectionPrimaryHit()) data.setPathType(NRDPathType::DeltaReflection);
-            else if (path.isDeltaTransmissionPath()) data.setPathType(NRDPathType::DeltaTransmission);
-            else data.setPathType(NRDPathType::Residual);
-
-            data.setRadiance(path.L);
-
-            outputNRD.sampleRadiance[outIdx] = data;
-        }
-*/
     }
 };

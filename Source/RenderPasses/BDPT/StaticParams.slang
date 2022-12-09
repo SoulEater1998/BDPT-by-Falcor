@@ -38,6 +38,9 @@ __exported import Rendering.Materials.TexLODTypes;
 
 static const uint kUseViewDir = USE_VIEW_DIR;
 static const uint kSamplesPerPixel = SAMPLES_PER_PIXEL;
+
+static const uint kLightSubpathPerThread = LIGHT_SUBPATH_PER_THREAD;
+
 static const uint kMaxSurfaceBounces = MAX_SURFACE_BOUNCES;
 static const uint kMaxDiffuseBounces = MAX_DIFFUSE_BOUNCES;
 static const uint kMaxSpecularBounces = MAX_SPECULAR_BOUNCES;
