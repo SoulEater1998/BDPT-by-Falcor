@@ -158,9 +158,9 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
-
+        LightVertex lv
         //sample initial ray for light subpath
-        gPathTracer.generateLightPath(pathID, path);
+        gPathTracer.generateLightPath(pathID, path, lv);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.

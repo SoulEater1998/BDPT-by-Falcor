@@ -443,3 +443,22 @@ float2 sqr(float2 v) { return v*v; }
 float3 sqr(float3 v) { return v*v; }
 
 float4 sqr(float4 v) { return v*v; }
+
+/******************************************************************************
+
+    BDPT
+
+******************************************************************************/
+
+void CoordinateSystem(const float3 v1, out float3 v2, out float3 v3)
+{
+    if(abs(v1.x) > abs(v1.y))
+    {
+        v2 = float3(-v1.z, 0.f, v1.x) / sqrt(v1.x * v1.x + v1.z * v1.z);
+    }
+    else
+    {
+        v2 = float3(0.f, v1.z, -v1.y) / sqrt(v1.y * v1.y + v1.z * v1.z);
+    }
+    v3 = cross(v1, v2);
+}

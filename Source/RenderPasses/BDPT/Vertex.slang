@@ -16,7 +16,7 @@ struct Vertex
     float pdfFwd = 0;
     float pdfRev = 0;
     bool delta = false;
-    VertexType tpye;
+    VertexType type;
 };
 
 struct LightVertex : public Vertex

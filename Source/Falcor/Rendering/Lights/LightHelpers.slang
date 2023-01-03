@@ -55,9 +55,12 @@ struct AnalyticLightSample
     float3  posW;           ///< Sampled point on the light source in world space (for local lights only).
     float3  normalW;        ///< Normal of the sampled point on the light source in world space (normalized).
     float3  dir;            ///< Direction from the shading point to the sampled point on the light in world space (normalized).
-    float   distance;       ///< Distance from the shading point to sampled point on the light.
+    union{
+        float   distance;   ///< Distance from the shading point to sampled point on the light.
+        float   pdfDir;     ///< Probability density function of direction for BDPT.
+    }
     float3  Li;             ///< Incident radiance at the shading point (unshadowed). Note: Already divided by the pdf.
-    float   pdf;            ///< Probability density function with respect to solid angle at the shading point.
+    float   pdf;            ///< Probability density function with respect to solid angle at the shading point.(pdf of position for BDPT)
 };
 
 /** Internal helper function to finalize the shared computations for area light samples.
@@ -84,6 +87,27 @@ bool finalizeAreaLightSample(const float3 shadingPosW, const LightData light, in
     return true;
 }
 
+/** Internal helper function to finalize the shared computations for area light samples for BDPT.
+    The input sample must already have posW and normalW computed.
+    \return True if the sample is valid, false otherwise.
+*/
+bool finalizeAreaLightSample_BDPT(const LightData light, const float2 u_d, inout AnalyticLightSample ls)
+{
+    // Sample a direction
+    float pdf;
+    float3 w = sample_cosine_hemisphere_concentric(u_d, pdf);
+    float3 v2, v3;
+    float3 n = ls.normalW;
+    CoordinateSystem(n, v2, v3);
+
+    ls.dir = normalize(w.x * v2 + w.y * v3 + w.z * n);
+    ls.pdfDir = pdf;
+    ls.pdf = 1.f / light.surfaceArea;
+    ls.Li = light.intensity;
+
+    return true;
+}
+
 /** Samples a rectangular area light source.
     \param[in] shadingPosW Shading point in world space.
     \param[in] light Light data.
@@ -105,6 +129,29 @@ bool sampleRectAreaLight(const float3 shadingPosW, const LightData light, const 
     ls.normalW = normalize(mul(light.transMatIT, float4(0.f, 0.f, 1.f, 0.f)).xyz);
 
     return finalizeAreaLightSample(shadingPosW, light, ls);
+}
+
+/** Samples a rectangular area light source for BDPT.
+    \param[in] light Light data.
+    \param[in] u Uniform random numbers which will be used to sample position.
+    \param[in] u_d Uniform random numbers which will be used to sample direction.
+    \param[out] ls Light sample struct.
+    \return True if a sample was generated, false otherwise.
+*/
+bool sampleRectAreaLight_BDPT(const LightData light, const float2 u, const float2 u_d, out AnalyticLightSample ls)
+{
+    // Pick a random sample on the quad.
+    // The quad is from (-1,-1,0) to (1,1,0) in object space, but may be scaled by its transform matrix.
+    float3 pos = float3(u.x * 2.f - 1.f, u.y * 2.f - 1.f, 0.f);
+
+    // Apply model to world transformation matrix.
+    ls.posW = mul(light.transMat, float4(pos, 1.f)).xyz;
+
+    // Setup world space normal.
+    // TODO: normalW is not correctly oriented for mesh instances that have flipped triangle winding.
+    ls.normalW = normalize(mul(light.transMatIT, float4(0.f, 0.f, 1.f, 0.f)).xyz);
+
+    return finalizeAreaLightSample_BDPT(light, u_d, ls);
 }
 
 /** Samples a spherical area light source.
@@ -129,6 +176,28 @@ bool sampleSphereAreaLight(const float3 shadingPosW, const LightData light, cons
     return finalizeAreaLightSample(shadingPosW, light, ls);
 }
 
+/** Samples a spherical area light source for BDPT.
+    \param[in] light Light data.
+    \param[in] u Uniform random numbers which will be used to sample position.
+    \param[in] u_d Uniform random numbers which will be used to sample direction.
+    \param[out] ls Light sample struct.
+    \return True if a sample was generated, false otherwise.
+*/
+bool sampleSphereAreaLight_BDPT(const LightData light, const float2 u, const float2 u_d, out AnalyticLightSample ls)
+{
+    // Sample a random point on the sphere.
+    // TODO: We should pick a random point on the hemisphere facing the shading point.
+    float3 pos = sample_sphere(u);
+
+    // Apply model to world transformation matrix.
+    ls.posW = mul(light.transMat, float4(pos, 1.f)).xyz;
+
+    // Setup world space normal.
+    ls.normalW = normalize(mul(light.transMatIT, float4(pos, 0.f)).xyz);
+
+    return return finalizeAreaLightSample_BDPT(light, u_d, ls);
+}
+
 /** Samples disc area light source.
     \param[in] shadingPosW Shading point in world space.
     \param[in] light Light data.
@@ -149,6 +218,28 @@ bool sampleDiscAreaLight(const float3 shadingPosW, const LightData light, const 
     ls.normalW = normalize(mul(light.transMatIT, float4(0.f, 0.f, 1.f, 0.f)).xyz);
 
     return finalizeAreaLightSample(shadingPosW, light, ls);
+}
+
+/** Samples a spherical area light source for BDPT.
+    \param[in] light Light data.
+    \param[in] u Uniform random numbers which will be used to sample position.
+    \param[in] u_d Uniform random numbers which will be used to sample direction.
+    \param[out] ls Light sample struct.
+    \return True if a sample was generated, false otherwise.
+*/
+bool sampleDiscAreaLight_BDPT(const LightData light, const float2 u, const float2 u_d, out AnalyticLightSample ls)
+{
+    // Sample a random point on the disk.
+    // TODO: Fix spelling disagreement between disc vs disk.
+    float3 pos = float3(sample_disk(u), 0.f);
+
+    // Transform to world space.
+    ls.posW = mul(light.transMat, float4(pos, 1.f)).xyz;
+
+    // Setup world space normal.
+    ls.normalW = normalize(mul(light.transMatIT, float4(0.f, 0.f, 1.f, 0.f)).xyz);
+
+    return return finalizeAreaLightSample_BDPT(light, u_d, ls);
 }
 
 /** Samples a distant light source.
@@ -301,4 +392,34 @@ bool evalLightApproximate(const float3 shadingPosW, const LightData light, out A
 
     // All other light types are not supported.
     return false;
+}
+
+
+
+
+/** Samples an analytic light source for BDPT.
+    This function calls the correct sampling function depending on the type of light.
+    \param[in] light Light data.
+    \param[in,out] sg Sample generator.
+    \param[out] ls Sampled point on the light and associated sample data, only valid if true is returned.
+    \return True if a sample was generated, false otherwise.
+*/
+bool sampleLight_BDPT<S : ISampleGenerator>(const LightData light, inout S sg, out AnalyticLightSample ls)
+{
+    // Sample the light based on its type: point, directional, or area.
+    switch (light.type)
+    {
+    //TODO: sample point(spot) light for BDPT
+    //TODO: sample directional light for BDPT
+    case LightType::Rect:
+        return sampleRectAreaLight_BDPT(light, sampleNext2D(sg), sampleNext2D(sg), ls);
+    case LightType::Sphere:
+        return sampleSphereAreaLight_BDPT(light, sampleNext2D(sg), sampleNext2D(sg), ls);
+    case LightType::Disc:
+        return sampleDiscAreaLight_BDPT(light, sampleNext2D(sg), sampleNext2D(sg), ls);
+    //TODO: sample distant light for BDPT
+    default:  //ignore directional light & distant light & point(spot) light 
+        ls = {};
+        return false; // Should not happen
+    }
 }
