@@ -340,6 +340,42 @@ bool samplePointLight(const float3 shadingPosW, const LightData light, out Analy
     return true;
 }
 
+bool samplePointLight_BDPT(const LightData light, const float2 u_d, out AnalyticLightSample ls)
+{
+    // Get the position and normal.
+    ls.posW = light.posW;
+    ls.normalW = light.dirW;
+
+    // Sample a direction
+    float pdf;
+    float3 w = sample_cosine_hemisphere_concentric(u_d, pdf);
+    float3 v2, v3;
+    float3 n = ls.normalW;
+    CoordinateSystem(n, v2, v3);
+    ls.dir = normalize(w.x * v2 + w.y * v3 + w.z * n);
+    ls.pdfDir = pdf;
+
+    // Calculate the falloff for spot-lights.
+    float cosTheta = -dot(ls.dir, light.dirW);
+    float falloff = 1.f;
+    if (cosTheta < light.cosOpeningAngle)
+    {
+        falloff = 0.f;
+    }
+    else if (light.penumbraAngle > 0.f)
+    {
+        float deltaAngle = light.openingAngle - acos(cosTheta);
+        falloff = smoothstep(0.f, light.penumbraAngle, deltaAngle);
+    }
+
+    // Compute incident radiance at shading point.
+    ls.Li = light.intensity * falloff;
+
+    // For a point light, the PDF with respect to solid angle is a Dirac function. Set to zero.
+    ls.pdf = 0.f;
+
+    return true;
+}
 /** Samples an analytic light source.
     This function calls the correct sampling function depending on the type of light.
     \param[in] shadingPosW Shading point in world space.
@@ -409,8 +445,9 @@ bool sampleLight_BDPT<S : ISampleGenerator>(const LightData light, inout S sg, o
     // Sample the light based on its type: point, directional, or area.
     switch (light.type)
     {
-    //TODO: sample point(spot) light for BDPT
     //TODO: sample directional light for BDPT
+    case LightType::Point:
+        return samplePointLight_BDPT(light, sampleNext2D(sg), ls);
     case LightType::Rect:
         return sampleRectAreaLight_BDPT(light, sampleNext2D(sg), sampleNext2D(sg), ls);
     case LightType::Sphere:
