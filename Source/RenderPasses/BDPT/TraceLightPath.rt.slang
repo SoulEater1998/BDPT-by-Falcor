@@ -154,13 +154,13 @@ struct Scheduler
 
     /** Traces a path and write result to output.
         \param[in] pathID Path ID.
+        \param[in] line   Pixel per line.
     */
-    void tracePath(uint pathID)
+    void tracePath(uint pathID, uint line)
     {
         PathState path = {};
-        LightVertex lv
         //sample initial ray for light subpath
-        gPathTracer.generateLightPath(pathID, path, lv);
+        gPathTracer.generateLightPath(pathID, line, path);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.
@@ -173,7 +173,7 @@ struct Scheduler
     /** Runs the path tracer for a single pixel.
         \param[in] pixel Pixel index.
     */
-    void run(uint2 pixel)
+    void run(uint2 pixel, uint2 dim)
     {
         // Determine number of samples to take.
         uint samplesRemaining = kLightSubpathPerThread;
@@ -183,7 +183,7 @@ struct Scheduler
         {
             samplesRemaining -= 1;
             uint pathID = pixel.x | (pixel.y << 12) | (samplesRemaining << 24);
-            tracePath(pathID);
+            tracePath(pathID, dim.x);
         }
     }
 }
@@ -314,5 +314,5 @@ void rayGen()
     uint2 frameDim = DispatchRaysDimensions().xy;
     if (all(pixel >= frameDim)) return;
 
-    gScheduler.run(pixel);
+    gScheduler.run(pixel, frameDim);
 }

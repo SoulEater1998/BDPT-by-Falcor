@@ -10,7 +10,7 @@ enum class VertexType
 
 struct Vertex
 {
-    //ShadingData sd;
+    ShadingData sd;
     float3 beta;
     
     float pdfFwd = 0;
@@ -19,15 +19,5 @@ struct Vertex
     VertexType type;
 };
 
-struct LightVertex : public Vertex
-{
-    float3 normal;
-    float3 pos;
-}
-
-struct SMVertex : public Vertex
-{
-    ShadingData sd;
-}
 
 

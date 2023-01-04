@@ -94,7 +94,8 @@ struct PathTracer
     RWStructuredBuffer<ColorType> sampleColor;      ///< Output per-sample color if kSamplesPerPixel != 1.
 
     RWTexture2D<float4> outputColor;                ///< Output color buffer if kSamplesPerPixel == 1.
-
+    
+    RWStructuredBuffer<Vertex> LightPathsVertexs    ///< Output the Vertex of all the light paths.
     /*******************************************************************
                                 Static members
     *******************************************************************/
@@ -241,29 +242,33 @@ struct PathTracer
 
     /** Generate the first vertex of the light subpath
         \param[in] pathID Path ID which encodes pixel and sample index.
+        \param[in] line Pixel per line.
         \param[out] path Path state for the primary hit.
     */
-    void generateLightPath(const uint pathID, out PathState path, out LightVertex lv)
+    void generateLightPath(const uint pathID, const uint line, out PathState path)
     {
         //intial path state
         path = {}
         path.setActive();
         path.id = pathID;
 
+        Vertex lv;
         const uint2 pixel = path.getPixel();
         const uint maxSpp = kSamplesPerPixel > 0 ? kSamplesPerPixel : kMaxSamplesPerPixel;
         path.sg = SampleGenerator(pixel, params.seed * maxSpp + path.getSampleIdx());
 
         //Sample a point on Lights
         float3 ray_dir;
-        if (!generateLightSample_BDPT(path.sg, lv, ray_dir)) return false;
+        float dirPdf;
+        if (!generateLightSample_BDPT(path.sg, lv, ray_dir, dirPdf)) return false;
+        LightPathsVertexs[(pixel.y * line + pixel.x) * kMaxSurfaceBounces] = lv;
 
-        path.origin = lv.pos;
-        path.normal = lv.normal;
+        path.origin = lv.sd.posW;
+        path.normal = lv.sd.N;
         path.dir = ray_dir;
 
-
-
+        path.L = lv.beta;
+        path.pdf = dirPdf;
     }
 
     /** Set up path for logging and debugging.
@@ -489,7 +494,7 @@ struct PathTracer
         \param[out] ls Struct describing valid samples.
         \return True if the sample is valid and has nonzero contribution, false otherwise.
     */
-    bool generateEmissiveSample_BDPT(inout SampleGenerator sg, out LightVertex lv, out float3 ray_dir)
+    bool generateEmissiveSample_BDPT(inout SampleGenerator sg, out Vertex lv, out float3 ray_dir, out float dirPdf)
     {
         lv = {}; // Default initialization to avoid divergence at returns.
         if (!kUseEmissiveLights) return false;
@@ -515,7 +520,6 @@ struct PathTracer
 
         //sample a cosine-weighted outgoing direction w.  
         float2 v = sampleNext2D(sg);
-        float dirPdf;
         float3 w = sample_cosine_hemisphere_polar(v, dirPdf);
         float3 v2, v3;
         CoordinateSystem(normal, v2, v3);
@@ -528,8 +532,8 @@ struct PathTracer
         lv.beta = Le * abs(dot(normal, w)) / (triangleSelectionPdf * posPdf * dirPdf); //the "beta" of the subpath
         lv.pdfFwd = triangleSelectionPdf * posPdf;
         lv.type = VertexType::Light;
-        lv.normal = normal;
-        lv.pos = pos;
+        lv.sd.N = normal;
+        lv.sd.posW = pos;
 
         return any(lv.beta > 0.f);
     }
@@ -573,7 +577,7 @@ struct PathTracer
         \param[out] lv Struct describing valid samples.
         \return True if the sample is valid and has nonzero contribution, false otherwise.
     */
-    bool generateAnalyticLightSample_BDPT(inout SampleGenerator sg, out LightVertex lv, out float3 ray_dir)
+    bool generateAnalyticLightSample_BDPT(inout SampleGenerator sg, out Vertex lv, out float3 ray_dir, out float dirPdf)
     {
         lv = {}; // Default initialization to avoid divergence at returns.
 
@@ -589,12 +593,13 @@ struct PathTracer
         AnalyticLightSample lightSample;
         if (!sampleLight_BDPT(gScene.getLight(lightIndex), sg, lightSample)) return false;
 
-        lv.pos = lightSample.posW;
-        lv.normal = lightSample.normalW;
+        lv.sd.posW = lightSample.posW;
+        lv.sd.N = lightSample.normalW;
         ray_dir = lightSample.dir;
         lv.beta = lightSample.Li * dot(lv.normal, ray_dir) / (lightCountPdf * lightSample.pdf * lightSample.pdfDir);
         lv.pdfFwd = lightCountPdf * lightSample.pdf;
         lv.type = VertexType::Light;
+        dirPdf = lightSample.pdfDir;
 
         return any(lv.beta > 0.f);
     }
@@ -707,7 +712,7 @@ struct PathTracer
         \param[out] lv Struct describing valid samples vertex.
         \return True if the sample is valid and has nonzero contribution, false otherwise.
     */
-    bool generateLightSample_BDPT(inout SampleGenerator sg, out LightVertex lv, out ray_dir)
+    bool generateLightSample_BDPT(inout SampleGenerator sg, out Vertex lv, out float3 ray_dir, out float dirPdf)
     {
         lv = {};
 
@@ -720,11 +725,11 @@ struct PathTracer
         if (kUseEmissiveLights && lightType == (uint)LightType::Emissive)
         {
             // Emissive light samplers have an option to exclusively sample the upper hemisphere.
-            valid = generateEmissiveSample_BDPT(sg, lv, ray_dir);
+            valid = generateEmissiveSample_BDPT(sg, lv, ray_dir, dirPdf);
         }
         if (kUseAnalyticLights && lightType == (uint)LightType::Analytic)
         {
-            valid = generateAnalyticLightSample_BDPT(sg, lv, ray_dir);
+            valid = generateAnalyticLightSample_BDPT(sg, lv, ray_dir, dirPdf);
         }
         if (!valid) return false;
 
