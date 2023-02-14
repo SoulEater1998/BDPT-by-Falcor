@@ -37,8 +37,10 @@ import Rendering.RTXDI.RTXDI;
 import Utils.Color.ColorHelpers;
 import Utils.Geometry.GeometryHelpers;
 import Utils.Debug.PixelDebug;
+import Utils.Math.MathHelpers;
 import LoadShadingData;
 import ColorType;
+import PathData;
 __exported import PathState;
 __exported import Params;
 
@@ -56,13 +58,14 @@ inline void CoordinateSystem(const float3 v1, out float3 v2, out float3 v3)
     v3 = cross(v1, v2);
 }
 */
+static const uint tempBufferCount = 10;
+//Vertex tempVertexBuffer[tempBufferCount]; 
 
 /** Path tracer.
 
     This implements the high-level path tracing logic and is shared among
     different scheduling implementations.
 */
-
 
 struct PathTracer
 {
@@ -79,7 +82,7 @@ struct PathTracer
     };
 
     PathTracerParams params;                        ///< Runtime parameters.
-
+    RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
     EnvMapSampler envMapSampler;                    ///< Environment map sampler. Only valid when kUseEnvLight == true.
     EmissiveLightSampler emissiveSampler;           ///< Emissive light sampler. Only valid when kUseEmissiveLights == true.
@@ -89,13 +92,14 @@ struct PathTracer
     Texture2D<float3> viewDir;                      ///< Optional view direction. Only valid when kUseViewDir == true.
     Texture2D<uint> sampleCount;                    ///< Optional input sample count buffer. Only valid when kSamplesPerPixel == 0.
     Texture2D<uint> sampleOffset;                   ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
+    //uint line_number;
 
     // Outputs
-    RWStructuredBuffer<ColorType> sampleColor;      ///< Output per-sample color if kSamplesPerPixel != 1.
+    RWStructuredBuffer<ColorType> sampleColor;            ///< Output per-sample color if kSamplesPerPixel != 1.
 
-    RWTexture2D<float4> outputColor;                ///< Output color buffer if kSamplesPerPixel == 1.
-    
-    RWStructuredBuffer<Vertex> LightPathsVertexs    ///< Output the Vertex of all the light paths.
+    RWTexture2D<float4> outputColor;                      ///< Output color buffer if kSamplesPerPixel == 1.
+
+    RWStructuredBuffer<Vertex> LightPathsVertexsBuffer;   ///< Output the Vertex of all the light paths.
     /*******************************************************************
                                 Static members
     *******************************************************************/
@@ -245,10 +249,10 @@ struct PathTracer
         \param[in] line Pixel per line.
         \param[out] path Path state for the primary hit.
     */
-    void generateLightPath(const uint pathID, const uint line, out PathState path)
+    void generateLightPath(const uint pathID, out PathState path)
     {
-        //intial path state
-        path = {}
+        // intial path state
+        path = {};
         path.setActive();
         path.id = pathID;
 
@@ -260,14 +264,16 @@ struct PathTracer
         //Sample a point on Lights
         float3 ray_dir;
         float dirPdf;
-        if (!generateLightSample_BDPT(path.sg, lv, ray_dir, dirPdf)) return false;
-        LightPathsVertexs[(pixel.y * line + pixel.x) * kMaxSurfaceBounces] = lv;
+        if (!generateLightSample_BDPT(path.sg, lv, ray_dir, dirPdf)) return;
+        LightPathsVertexsBuffer[lightPathOffset(path)] = lv;
+        //tempVertexBuffer[0] = lv;
+        //LightPathsVertexsBuffer[(pixel.y * line_number + pixel.x) * kMaxSurfaceBounces] = lv;
 
         path.origin = lv.sd.posW;
         path.normal = lv.sd.N;
         path.dir = ray_dir;
 
-        path.L = lv.beta;
+        path.thp = lv.beta;
         path.pdf = dirPdf;
     }
 
@@ -511,7 +517,7 @@ struct PathTracer
         const float3 barycentrics = sample_triangle(u);
         const EmissiveTriangle tri = gScene.lightCollection.getTriangle(triangleIndex);
         float3 pos = tri.getPosition(barycentrics);
-        float3 normal = tri.normal
+        float3 normal = tri.normal;
         float2 uv = tri.getTexCoord(barycentrics);
         float3 Le = gScene.materials.evalEmissive(tri.materialID, uv);  
 
@@ -526,7 +532,7 @@ struct PathTracer
         w = w.x * v2 + w.y * v3 + w.z * n; //ray direction
         ray_dir = w;
 
-        if(posPdf <= 0.f || dirPdf <= 0.f || all(Le) <= 0.f) return flase;
+        if(posPdf <= 0.f || dirPdf <= 0.f || all(Le) <= 0.f) return false;
 
         // Setup returned sample.
         lv.beta = Le * abs(dot(normal, w)) / (triangleSelectionPdf * posPdf * dirPdf); //the "beta" of the subpath
@@ -587,7 +593,7 @@ struct PathTracer
         // Sample analytic light source selected uniformly from the light list.
         // TODO: Sample based on estimated contributions as pdf.
         uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
-        uint lightCountPdf = 1.f / lightCount
+        float lightCountPdf = 1.f / (float)lightCount;
 
         // Sample local light source.
         AnalyticLightSample lightSample;
@@ -596,10 +602,10 @@ struct PathTracer
         lv.sd.posW = lightSample.posW;
         lv.sd.N = lightSample.normalW;
         ray_dir = lightSample.dir;
-        lv.beta = lightSample.Li * dot(lv.normal, ray_dir) / (lightCountPdf * lightSample.pdf * lightSample.pdfDir);
+        lv.beta = lightSample.Li * dot(lv.sd.N, ray_dir) / (lightCountPdf * lightSample.pdf * lightSample.distance);
         lv.pdfFwd = lightCountPdf * lightSample.pdf;
         lv.type = VertexType::Light;
-        dirPdf = lightSample.pdfDir;
+        dirPdf = lightSample.distance;
 
         return any(lv.beta > 0.f);
     }
@@ -1038,6 +1044,121 @@ struct PathTracer
         }
     }
 
+    void lightPathHandleHit(inout PathState path) {
+        const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+        const bool isCurveHit = kUseCurves && (hitType == HitType::Curve);
+
+        let lod = createTextureSampler(path, isPrimaryHit, isTriangleHit);
+
+        // Load shading data. This is a long latency operation.
+        ShadingData sd = loadShadingData(path.hit, path.origin, path.dir, isPrimaryHit, lod);
+
+        const bool isHairMaterial = kUseHairMaterial && (sd.mtl.getMaterialType() == MaterialType::Hair);
+        // TODO: Decouple geometry from the material.
+        const bool isCurvePolyTubeHit = isTriangleHit && isHairMaterial;
+
+        if (hasFinishedSurfaceBounces(path) || path.getVertexIndex() >= kMaxSurfaceBounces) {
+            path.terminate();
+            return;
+        }
+
+        // Account for volume absorption.
+        if (!path.interiorList.isEmpty())
+        {
+            const uint materialID = path.interiorList.getTopMaterialID();
+            const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
+            updatePathThroughput(path, HomogeneousVolumeSampler::evalTransmittance(hvd, length(sd.posW - path.origin)));
+
+        }
+
+        // Reject false hits in nested dielectrics.
+        if (!handleNestedDielectrics(sd, path)) return;
+
+        //uint bounce = path.getVertexIndex();
+        Vertex *vertex = &LightPathsVertexsBuffer[lightPathOffset(path)]; // = &tempVertexBuffer[bounce];
+
+        if (isCurveHit)
+        {
+            // For curves, we set the new origin at the sphere center.
+            path.origin = sd.posW - sd.N * sd.curveRadius;
+        }
+        else if (isCurvePolyTubeHit)
+        {
+            // For curves tessellated into poly-tubes, we offset the new origin away from the curve center.
+            path.origin = sd.posW + sd.N * sd.curveRadius * 0.1f;
+        }
+        else
+        {
+            path.origin = sd.computeNewRayOrigin();
+        }
+
+        //TODO: move this to TraceLightPath
+        Vertex *prev = &LightPathsVertexsBuffer[lightPathOffset(path) - 1];
+
+        *vertex = Vertex::create(sd, path.thp, path.pdf, 0, VertexType::SurfaceOrMedium);
+        vertex.pdfRev = prev.ConvertDensity(path.pdf, *vertex);
+
+        const IBSDF bsdf = gScene.materials.getBSDF(sd, lod);
+        BSDFProperties bsdfProperties = bsdf.getProperties(sd);
+
+        // Disable specular lobes if caustics are disabled and path already contains a diffuse vertex.
+        bool isSpecular = bsdfProperties.roughness <= params.specularRoughnessThreshold;
+        if (kDisableCaustics && path.getBounces(BounceType::Diffuse) > 0 && isSpecular)
+        {
+            sd.mtl.setActiveLobes((uint)LobeType::Diffuse);
+        }
+
+        // Optionally disable emission inside volumes.
+        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume())
+        {
+            bsdfProperties.emission = float3(0.f);
+        }
+
+        BSDFSample bs;
+        bool valid = bsdf.sample(sd, path.sg, bs, kUseBSDFSampling);
+
+        float3 wi = sd.V;
+        ShadingData sdRev = sd;
+        sdRev.V = bs.wo;
+        const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
+        float pdfRev = bsdfRev.evalPdf(sdRev, wi);
+
+        if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
+
+        if (bs.isLobe(LobeType::Delta)) {
+            vertex.delta = true;
+            pdfRev = 0;
+            path.pdf = 0;
+        }
+
+        prev.pdfRev = vertex.ConvertDensity(pdfRev, *prev);
+
+        const bool isLastVertex = hasFinishedSurfaceBounces(path) || path.getVertexIndex() + 1 >= kMaxSurfaceBounces;
+
+        if (isLastVertex || !valid) {
+            path.terminate();
+        }
+        
+    }
+
+
+    void pushInBuffer(PathState path, uint line) {
+        uint2 pixel = path.getPixel();
+        uint base = (pixel.y * line + pixel.x) * kMaxSurfaceBounces;
+        uint bounces = path.getVertexIndex();
+        for (uint i = 0; i < bounces; ++i) {
+            LightPathsVertexsBuffer[base + i] = tempVertexBuffer[i];
+        }
+    }
+
+    uint lightPathOffset(PathState path) {
+        uint2 pixel = path.getPixel();
+        uint base = (pixel.y * kLightPassWidth + pixel.x) * kMaxSurfaceBounces;
+        return base + path.getVertexIndex();
+    }
+
     /** Handle the case when a scatter ray misses the scene.
         \param[in,out] path The path state.
     */
@@ -1086,6 +1207,20 @@ struct PathTracer
 
         }
 
+        path.terminate();
+    }
+
+    void LightPathHandleMiss(inout PathState path) {
+        bool computeEnv = kUseEnvLight;
+        if (computeEnv && path.getVertexIndex() < kMaxSurfaceBounces) {
+            Vertex v = Vertex::init();
+            v.type = VertexType::Light;
+            v.beta = path.thp;
+            v.pdfFwd = path.pdf;
+            v.sd.N = normalize(-path.dir);
+            v.sd.posW = path.origin + path.dir;
+            LightPathsVertexsBuffer[lightPathOffset(path)] = v;
+        }
         path.terminate();
     }
 

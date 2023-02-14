@@ -59,3 +59,4 @@ static const TexLODMode kPrimaryLodMode = TexLODMode(PRIMARY_LOD_MODE);
 static const uint kColorFormat = COLOR_FORMAT;
 static const uint kMISHeuristic = MIS_HEURISTIC;
 static const float kMISPowerExponent = MIS_POWER_EXPONENT;
+static const uint kLightPassWidth = LIGHT_PASS_WIDTH;

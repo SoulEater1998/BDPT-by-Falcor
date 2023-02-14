@@ -102,7 +102,7 @@ struct Scheduler
         path.sceneLength = float16_t(kNRDInvalidPathLength);
 
         gPathTracer.setupPathLogging(path);
-        gPathTracer.handleMiss(path);
+        gPathTracer.LightPathHandleMiss(path);
 
         payload = PathPayload::pack(path);
     }
@@ -120,14 +120,8 @@ struct Scheduler
 
         gPathTracer.setupPathLogging(path);
 
-#if defined(DELTA_REFLECTION_PASS)
-        gPathTracer.handleDeltaReflectionHit(path);
-#elif defined(DELTA_TRANSMISSION_PASS)
-        gPathTracer.handleDeltaTransmissionHit(path);
-#else
         VisibilityQuery vq;
-        gPathTracer.handleHit(path, vq);
-#endif
+        gPathTracer.lightPathHandleHit(path);
 
         payload = PathPayload::pack(path);
     }
@@ -156,11 +150,11 @@ struct Scheduler
         \param[in] pathID Path ID.
         \param[in] line   Pixel per line.
     */
-    void tracePath(uint pathID, uint line)
+    void tracePath(uint pathID)
     {
         PathState path = {};
         //sample initial ray for light subpath
-        gPathTracer.generateLightPath(pathID, line, path);
+        gPathTracer.generateLightPath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.
@@ -168,6 +162,7 @@ struct Scheduler
         {
             nextHit(path);
         }
+        //gPathTracer.pushInBuffer(path, dim.x);
     }
 
     /** Runs the path tracer for a single pixel.
@@ -176,15 +171,17 @@ struct Scheduler
     void run(uint2 pixel, uint2 dim)
     {
         // Determine number of samples to take.
-        uint samplesRemaining = kLightSubpathPerThread;
+        uint samplesRemaining = 1;//kLightSubpathPerThread;
         
         // Loop over samples.
         while (samplesRemaining > 0)
         {
             samplesRemaining -= 1;
             uint pathID = pixel.x | (pixel.y << 12) | (samplesRemaining << 24);
-            tracePath(pathID, dim.x);
+            tracePath(pathID);
         }
+
+        
     }
 }
 

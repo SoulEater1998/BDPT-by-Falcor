@@ -55,10 +55,10 @@ struct AnalyticLightSample
     float3  posW;           ///< Sampled point on the light source in world space (for local lights only).
     float3  normalW;        ///< Normal of the sampled point on the light source in world space (normalized).
     float3  dir;            ///< Direction from the shading point to the sampled point on the light in world space (normalized).
-    union{
-        float   distance;   ///< Distance from the shading point to sampled point on the light.
-        float   pdfDir;     ///< Probability density function of direction for BDPT.
-    }
+
+    float distance;         ///< Distance from the shading point to sampled point on the light & Probability density function of direction for BDPT
+    //float   pdfDir;       ///< Probability density function of direction for BDPT.
+    
     float3  Li;             ///< Incident radiance at the shading point (unshadowed). Note: Already divided by the pdf.
     float   pdf;            ///< Probability density function with respect to solid angle at the shading point.(pdf of position for BDPT)
 };
@@ -101,7 +101,7 @@ bool finalizeAreaLightSample_BDPT(const LightData light, const float2 u_d, inout
     CoordinateSystem(n, v2, v3);
 
     ls.dir = normalize(w.x * v2 + w.y * v3 + w.z * n);
-    ls.pdfDir = pdf;
+    ls.distance = pdf;
     ls.pdf = 1.f / light.surfaceArea;
     ls.Li = light.intensity;
 
@@ -195,7 +195,7 @@ bool sampleSphereAreaLight_BDPT(const LightData light, const float2 u, const flo
     // Setup world space normal.
     ls.normalW = normalize(mul(light.transMatIT, float4(pos, 0.f)).xyz);
 
-    return return finalizeAreaLightSample_BDPT(light, u_d, ls);
+    return finalizeAreaLightSample_BDPT(light, u_d, ls);
 }
 
 /** Samples disc area light source.
@@ -239,7 +239,7 @@ bool sampleDiscAreaLight_BDPT(const LightData light, const float2 u, const float
     // Setup world space normal.
     ls.normalW = normalize(mul(light.transMatIT, float4(0.f, 0.f, 1.f, 0.f)).xyz);
 
-    return return finalizeAreaLightSample_BDPT(light, u_d, ls);
+    return finalizeAreaLightSample_BDPT(light, u_d, ls);
 }
 
 /** Samples a distant light source.
@@ -353,7 +353,7 @@ bool samplePointLight_BDPT(const LightData light, const float2 u_d, out Analytic
     float3 n = ls.normalW;
     CoordinateSystem(n, v2, v3);
     ls.dir = normalize(w.x * v2 + w.y * v3 + w.z * n);
-    ls.pdfDir = pdf;
+    ls.distance = pdf;
 
     // Calculate the falloff for spot-lights.
     float cosTheta = -dot(ls.dir, light.dirW);

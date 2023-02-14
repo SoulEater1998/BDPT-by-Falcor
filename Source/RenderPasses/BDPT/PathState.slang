@@ -74,6 +74,7 @@ enum class BounceType
     Diffuse                 = 0,    ///< Diffuse reflection.
     Specular                = 1,    ///< Specular reflection (including delta).
     Transmission            = 2,    ///< Transmission (all kinds).
+    //All                     = 3,    ///< all.
 };
 
 // TODO: Compact encoding to reduce live registers, e.g. packed HitInfo, packed normals.
@@ -170,6 +171,11 @@ struct PathState
     {
         const uint shift = (uint)type << 3;
         return (bounceCounters >> shift) & 0xff;
+    }
+
+    uint getAllBounces()
+    {
+        return getBounces(BounceType::Diffuse) + getBounces(BounceType::Specular) + getBounces(BounceType::Transmission);
     }
 
     [mutating] void setBounces(BounceType type, uint bounces)
