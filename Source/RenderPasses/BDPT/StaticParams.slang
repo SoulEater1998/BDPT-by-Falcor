@@ -39,7 +39,7 @@ __exported import Rendering.Materials.TexLODTypes;
 static const uint kUseViewDir = USE_VIEW_DIR;
 static const uint kSamplesPerPixel = SAMPLES_PER_PIXEL;
 
-static const uint kLightSubpathPerThread = LIGHT_SUBPATH_PER_THREAD;
+//static const uint kLightSubpathPerThread = LIGHT_SUBPATH_PER_THREAD;
 
 static const uint kMaxSurfaceBounces = MAX_SURFACE_BOUNCES;
 static const uint kMaxDiffuseBounces = MAX_DIFFUSE_BOUNCES;
@@ -60,3 +60,5 @@ static const uint kColorFormat = COLOR_FORMAT;
 static const uint kMISHeuristic = MIS_HEURISTIC;
 static const float kMISPowerExponent = MIS_POWER_EXPONENT;
 static const uint kLightPassWidth = LIGHT_PASS_WIDTH;
+static const uint kLightPassHeight = LIGHT_PASS_HEIGHT;
+static const uint kCandidateNumber = CANDIDATE_NUMBER;

@@ -95,7 +95,6 @@ struct Scheduler
     /** Handle a miss.
         \param[in,out] payload Payload data.
     */
-
     void handleMiss(inout PathPayload payload)
     {
         PathState path = PathPayload::unpack(payload);
@@ -103,7 +102,8 @@ struct Scheduler
         path.sceneLength = float16_t(kNRDInvalidPathLength);
 
         gPathTracer.setupPathLogging(path);
-        gPathTracer.BDPTHandleMiss(path);
+        //gPathTracer.BDPTHandleMiss(path);
+        gPathTracer.handleMiss(path);
 
         payload = PathPayload::pack(path);
     }
@@ -121,8 +121,15 @@ struct Scheduler
 
         gPathTracer.setupPathLogging(path);
 
+#if defined(DELTA_REFLECTION_PASS)
+        gPathTracer.handleDeltaReflectionHit(path);
+#elif defined(DELTA_TRANSMISSION_PASS)
+        gPathTracer.handleDeltaTransmissionHit(path);
+#else
         VisibilityQuery vq;
-        gPathTracer.lightPathHandleHit(path);
+        gPathTracer.CameraPathHandleHit(path, vq);
+        //gPathTracer.handleHit(path, vq);
+#endif
 
         payload = PathPayload::pack(path);
     }
@@ -153,10 +160,31 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
-        //sample initial ray for light subpath
-        //gPathTracer.generateLightPath(pathID, path);
+
+        gPathTracer.generatePath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
+        // Handle primary hit/miss.
+        if (path.isHit())
+        {
+#if defined(DELTA_REFLECTION_PASS)
+            gPathTracer.handleDeltaReflectionHit(path);
+#elif defined(DELTA_TRANSMISSION_PASS)
+            gPathTracer.handleDeltaTransmissionHit(path);
+#else
+            VisibilityQuery vq;
+            //path.setVertexIndex(0);
+            gPathTracer.CameraPathHandleHit(path, vq);
+            //gPathTracer.handleHit(path, vq);
+#endif
+        }
+        else
+        {
+            // Note the primary miss has already been handled by the separate path generation pass
+            // the path tracer runs first. Abort execution here to avoid double work.
+            return;
+        }
+        
         // Trace path.
         
         while (path.isActive())
@@ -164,7 +192,10 @@ struct Scheduler
             nextHit(path);
         }
         
-        //gPathTracer.pushInBuffer(path, dim.x);
+        #if !defined(DELTA_REFLECTION_PASS) && !defined(DELTA_TRANSMISSION_PASS)
+        // gPathTracer.BDPTOutput(path);
+        gPathTracer.writeOutput(path);
+#endif
     }
 
     /** Runs the path tracer for a single pixel.
@@ -174,7 +205,7 @@ struct Scheduler
     {
         // Determine number of samples to take.
         uint samplesRemaining = 1; // kLightSubpathPerThread;
-        
+
         // Loop over samples.
         while (samplesRemaining > 0)
         {

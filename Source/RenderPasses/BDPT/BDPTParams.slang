@@ -52,9 +52,11 @@ static const uint2 kScreenTileBits = { 4, 4 };      ///< Bits needed to describe
 
 // Define path configuration limits.
 static const uint kMaxSamplesPerPixel = 16;         ///< Maximum supported sample count. We can use tiling to support large sample counts if needed.
-static const uint kMaxFrameDimension = 4096;        ///< Maximum supported frame dimension in pixels along x or y. We can increase the bit allocation if needed.
+static const uint kMaxFrameDimension = 1920;        ///< Maximum supported frame dimension in pixels along x or y. We can increase the bit allocation if needed.
 static const uint kMaxBounces = 254;                ///< Maximum supported number of bounces per bounce category (value 255 is reserved for internal use). The resulting path length may be longer than this.
 static const uint kMaxLightSamplesPerVertex = 8;    ///< Maximum number of shadow rays per path vertex for next-event estimation.
+static const uint kMaxCandidate = 16;
+static const uint kMaxFrameDimensionY = 1080;
 
 // Import static specialization constants.
 #ifndef HOST_CODE
@@ -77,7 +79,8 @@ struct PathTracerParams
 
     uint    frameCount = 0;             ///< Frames rendered. This is used as random seed.
     uint    seed = 0;                   ///< Random seed. This will get updated from the host depending on settings.
-    uint2   _pad0;
+    uint    LightPathsIndexBufferLength;
+    uint   _pad0;
 
 #ifndef HOST_CODE
     /** Computes the offset into the tiled sample buffer for a given tile.

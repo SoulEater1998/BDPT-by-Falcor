@@ -47,20 +47,26 @@ struct ShadingData
 {
     // Geometry data
     float3  posW;                   ///< Shading hit position in world space.
+    float   IoR;                    ///< Index of refraction for the medium on the front-facing side (i.e. "outside" the material at the hit).
     float3  V;                      ///< View direction, -incident direction (-ray.dir)
+    float   opacity;                ///< Opacity value in [0,1]. This is used for alpha testing.
     float3  N;                      ///< Shading normal at shading hit.
+    uint    materialID;             ///< Material ID at shading location.
     float3  T;                      ///< Shading tangent at shading hit.
-    float3  B;                      ///< Shading bitangent at shading hit.
-    float2  uv;                     ///< Texture mapping coordinates.
-    float3  faceN;                  ///< Face normal in world space, always on the front-facing side.
-    bool    frontFacing;            ///< True if primitive seen from the front-facing side.
     float   curveRadius;            ///< Curve cross-sectional radius. Valid only for geometry generated from curves.
+    float3  B;                      ///< Shading bitangent at shading hit.
+    bool    frontFacing;            ///< True if primitive seen from the front-facing side.
+    float2  uv;                     ///< Texture mapping coordinates.
+    MaterialHeader mtl;             ///< Material header data.
+    float3  faceN;                  ///< Face normal in world space, always on the front-facing side.
+    
+    
 
     // Material data
-    MaterialHeader mtl;             ///< Material header data.
-    uint    materialID;             ///< Material ID at shading location.
-    float   opacity;                ///< Opacity value in [0,1]. This is used for alpha testing.
-    float   IoR;                    ///< Index of refraction for the medium on the front-facing side (i.e. "outside" the material at the hit).
+    
+    
+    
+    
 
 
     // Utility functions

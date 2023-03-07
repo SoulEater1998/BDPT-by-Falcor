@@ -2,6 +2,7 @@
 __exported import LoadShadingData;
 __exported import Utils.Sampling.SampleGenerator;
 __exported import Scene.HitInfo;
+import PathState;
 
 enum class VertexType
 {
@@ -13,156 +14,127 @@ enum class VertexType
 struct Vertex
 {
     ShadingData sd;
-    float3 beta;
+    float3 beta = float3(1, 1, 1);
     bool valid = false;
 
-    float pdfFwd = 0;
-    float pdfRev = 0;
+    float pdfFwd = 0.f;
+    float pdfRev = 0.f;
     bool delta = false;
-    VertexType type;
+    VertexType type = VertexType::SurfaceOrMedium;
 
     static Vertex init() {
-        Vertex v;
+        Vertex v = {};
+        v.sd = {};
         v.valid = true;
         return v;
     }
 
     static Vertex create(ShadingData sd, float3 beta, float pdfFwd, float pdfRev, VertexType type) {
-        Vertex v;
+        Vertex v = {};
         v.beta = beta;
         v.sd = sd;
         v.valid = true;
         v.pdfFwd = pdfFwd;
         v.pdfRev = pdfRev;
         v.type = type;
-    }
+        return v;
+    };
 
     float ConvertDensity(float pdf, const Vertex next) {
         float3 w = next.sd.posW - sd.posW;
-        if (dot(w, w) == 0) return 0;
+        if (dot(w, w) == 0) return 0.f;
         float invDist2 = 1 / dot(w, w);
-        pdf *= abs(dot(next.sd.N, w * sqrt(invDist2)));
+        if(next.type == VertexType::SurfaceOrMedium) pdf *= abs(dot(next.sd.N, w * sqrt(invDist2)));
         return pdf * invDist2;
-    }
-}
+    };
 
-struct BDPathVertex
-{
-    float3 color;
-    bool valid;
-    float3 posW;
-    float3 N;
-    float3 V;
+    static Vertex createCamera(float3 posW, float3 N) {
+        Vertex cv = {};
+        cv.sd.posW = posW;
+        cv.sd.N = N;
+        cv.beta = 1.f;
+        cv.pdfFwd = 1.f;
+        return cv;
+    };
 
-    float3 dif;
-    float3 spec;
-    float rough;
-    bool isSpecular;
-
-    float pdfForward;
-
-    [mutating] void update(Vertex lv) {
-        color = lv.beta;
-        valid = true;
-        posW = lv.sd.posW;
-        N = lv.sd.N;
-        pdfForward = lv.pdfFwd;
-    }
-
-    static BDPathVertex init()
-    {
-        BDPathVertex v;
-        v.color = float3(0, 0, 0);
-        v.valid = false;
-        v.posW = float3(0, 0, 0);
-        v.N = float3(0, 0, 0);
-        v.V = float3(0, 0, 0);
-        v.dif = float3(0, 0, 0);
-        v.spec = float3(0, 0, 0);
-        v.rough = 0.0f;
-        v.isSpecular = false;
-        v.pdfForward = 0.0f;
-        return v;
-    }
-
-    static BDPathVertex create(float3 color, float3 posW, float3 N, float3 V, float3 dif, float3 spec, float rough, bool isSpecular, float pdfForward)
-    {
-        BDPathVertex v;
-        v.color = color;
-        v.valid = true;
-        v.posW = posW;
-        v.N = N;
-        v.V = V;
-        v.dif = dif;
-        v.spec = spec;
-        v.rough = rough;
-        v.isSpecular = isSpecular;
-        v.pdfForward = pdfForward;
-        return v;
-    }
+    static Vertex createLight(float3 posW, float3 beta, float pdfFwd) {
+        Vertex lv = {};
+        lv.sd.posW = posW;
+        lv.beta = beta;
+        lv.pdfFwd = pdfFwd;
+        return lv;
+    };
 };
 
-// The payload structure for our indirect rays
-struct RayPayload
+struct Reservoir
 {
-    float3 color;
-    SampleGenerator sg;
+    uint sampleIndex = 0;
+    float weightSum = 0;
+    uint M = 0; // The number of samples seen so far
+    float W = 0; // The total weight
 
-    float3 posW;
-    float3 N;
-    float3 V;
-    float3 dif;
-    float3 spec;
-    float rough;
-    bool isSpecular;
+    [mutating] void update(uint dstSample, float weight, float rnd) {
+        weightSum += weight;
+        M += 1;
+        sampleIndex = (rnd < weight / weightSum) ? dstSample : sampleIndex;
+    }
 
-    float pdfForward;
-
-    float3 rayOrigin;
-    float3 rayDir;
-
-    bool terminated;
 };
 
-RayPayload initPayload(float3 rayOrigin, float3 rayDir, float3 N,float3 color, SampleGenerator sg)
+struct CameraVertex
 {
-    RayPayload payload;
-    payload.rayOrigin = rayOrigin;
-    payload.rayDir = rayDir;
-    payload.sg = sg;
-    payload.color = color;
-    payload.posW = rayOrigin;
-    payload.N = N;
-    payload.V = float3(0.0f);
-    payload.dif = float3(0.0f);
-    payload.spec = float3(0.0f);
-    payload.rough = 0.0;
-    payload.isSpecular = false;
-    payload.pdfForward = 0.0;
-    payload.terminated = false;
-    return payload;
-}
+    VertexInfo v;
+    Reservoir r;
+};
 
-void updateRayData(inout RayPayload rayData, float3 color, float3 hit, float3 L, float3 N, float3 V, float3 dif, float3 spec, float rough, bool isSpecular, float pdfF)
+enum class VertexFlag {
+    typeMask = 0x0003,
+    valid = 0x0004,
+    delta = 0x0008,
+};
+
+struct VertexInfo
 {
-    // update brdf
-    rayData.color *= color;
+    HitInfo hit;
+    float3 origin;
+    float pdfFwd = 0;
+    float3 dir;
+    float pdfRev = 0;
+    float3 beta;
+    uint flagAndType = 0;
 
-    // update next ray segment
-    rayData.rayOrigin = hit;
-    rayData.rayDir = L;
+    static VertexInfo create(PathState path, Vertex v) {
+        VertexInfo vinfo = {};
+        vinfo.hit = path.hit;
+        vinfo.origin = path.origin;
+        vinfo.dir = path.dir;
+        vinfo.pdfFwd = v.pdfFwd;
+        vinfo.pdfRev = v.pdfRev;
+        vinfo.beta = v.beta;
 
-    // update geometry data
-    rayData.posW = hit;
-    rayData.N = N;
-    rayData.V = V;
+        uint flagAndType = uint(v.type);
+        flagAndType |= v.valid ? uint(VertexFlag::valid) : 0;
+        flagAndType |= v.delta ? uint(VertexFlag::delta) : 0;
+        vinfo.flagAndType = flagAndType;
 
-    // update material data
-    rayData.dif = dif;
-    rayData.spec = spec;
-    rayData.rough = rough;
-    rayData.isSpecular = isSpecular;
+        return vinfo;
+    }
 
-    // update pdf
-    rayData.pdfForward = pdfF;
-}
+    Vertex unpack(bool isPrimaryHit) {
+        const HitType hitType = hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+
+        let lod = ExplicitLodTextureSampler(0);
+        ShadingData sd = loadShadingData(hit, origin, dir, isPrimaryHit, lod);
+
+        Vertex result = Vertex::create(sd, beta, pdfFwd, pdfRev, VertexType(flagAndType & uint(VertexFlag::typeMask)));
+        result.delta = (flagAndType & uint(VertexFlag::delta)) != 0;
+        result.valid = (flagAndType & uint(VertexFlag::valid)) != 0;
+
+        return result;
+    }
+
+    bool isDelta() {
+        return (flagAndType & uint(VertexFlag::delta)) != 0;
+    }
+};

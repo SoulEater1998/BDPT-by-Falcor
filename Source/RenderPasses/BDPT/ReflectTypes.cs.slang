@@ -35,11 +35,15 @@
 
 import PathTracer;
 import ColorType;
+import PathData;
 
-ParameterBlock<PathTracer> pathTracer;
+ParameterBlock<PathTracer>      pathTracer;
+StructuredBuffer<ColorType>     sampleColor;
 
-StructuredBuffer<ColorType> sampleColor;
-
+//BDPT
+StructuredBuffer<Vertex>        LightPathsVertexsBuffer;
+StructuredBuffer<CameraVertex>  CameraPathsVertexsReservoirBuffer;
+StructuredBuffer<uint>          LightPathsIndexBuffer;
 
 
 void main() {}

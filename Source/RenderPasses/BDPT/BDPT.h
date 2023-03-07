@@ -37,7 +37,7 @@
 #include "Rendering/Utils/PixelStats.h"
 #include "Rendering/RTXDI/RTXDI.h"
 
-#include "Params.slang"
+#include "BDPTParams.slang"
 
 using namespace Falcor;
 
@@ -77,7 +77,7 @@ private:
         RtBindingTable::SharedPtr pBindingTable;
         RtProgramVars::SharedPtr pVars;
 
-        TracePass(const std::string& name, const std::string& passDefine, const Scene::SharedPtr& pScene, const Program::DefineList& defines, const Program::TypeConformanceList& globalTypeConformances);
+        TracePass(const std::string& name, const std::string& passDefine, const Scene::SharedPtr& pScene, const std::string& shaderFile, const Program::DefineList& defines, const Program::TypeConformanceList& globalTypeConformances);
         void prepareProgram(const Program::DefineList& defines);
     };
 
@@ -101,7 +101,7 @@ private:
     bool beginFrame(RenderContext* pRenderContext, const RenderData& renderData);
     void endFrame(RenderContext* pRenderContext, const RenderData& renderData);
     void generatePaths(RenderContext* pRenderContext, const RenderData& renderData);
-    void tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass);
+    void tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim);
     void resolvePass(RenderContext* pRenderContext, const RenderData& renderData);
 
     struct StaticParams
@@ -111,7 +111,10 @@ private:
         uint32_t    maxSurfaceBounces = 0;                      ///< Max number of surface bounces (diffuse + specular + transmission), up to kMaxPathLenth. This will be initialized at startup.
         uint32_t    maxDiffuseBounces = 3;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxSpecularBounces = 3;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
-        uint32_t    maxTransmissionBounces = 10;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
+        uint32_t    maxTransmissionBounces = 5;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
+        uint32_t    lightPassWidth = 64;                        ///<
+        uint32_t    lightPassHeight = 2;
+        uint32_t    candidateNumber = 16;
 
         // Sampling parameters
         uint32_t    sampleGenerator = SAMPLE_GENERATOR_TINY_UNIFORM; ///< Pseudorandom sample generator type.
@@ -139,6 +142,7 @@ private:
         //bool        useNRDDemodulation = true;                  ///< Global switch for NRD demodulation.
 
         Program::DefineList getDefines(const BDPT& owner) const;
+
     };
 
     // Configuration
@@ -178,10 +182,17 @@ private:
     std::unique_ptr<TracePass>      mpTracePass;                ///< Main trace pass.
     std::unique_ptr<TracePass>      mpTraceDeltaReflectionPass; ///< Delta reflection trace pass (for NRD).
     std::unique_ptr<TracePass>      mpTraceDeltaTransmissionPass;   ///< Delta transmission trace pass (for NRD).
+    std::unique_ptr<TracePass>      mpTraceLightPath;           ///< Generate light path (for BDPT).
+    std::unique_ptr<TracePass>      mpTraceCameraPath;          ///< Generate camera path (for BDPT).
 
     Texture::SharedPtr              mpSampleOffset;             ///< Output offset into per-sample buffers to where the samples for each pixel are stored (the offset is relative the start of the tile). Only used with non-fixed sample count.
     Buffer::SharedPtr               mpSampleColor;              ///< Compact per-sample color buffer. This is used only if spp > 1.
-    /*
+
+    //BDPT
+    Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
+    Buffer::SharedPtr               mpLightPathsIndexBuffer;
+    Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
+                                                                /*
     Buffer::SharedPtr               mpSampleGuideData;          ///< Compact per-sample denoiser guide data.
     Buffer::SharedPtr               mpSampleNRDRadiance;        ///< Compact per-sample NRD radiance data.
     Buffer::SharedPtr               mpSampleNRDHitDist;         ///< Compact per-sample NRD hit distance data.

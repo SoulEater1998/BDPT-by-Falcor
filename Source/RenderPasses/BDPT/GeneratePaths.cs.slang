@@ -38,7 +38,8 @@ import LoadShadingData;
 import PathTracer;
 import PathState;
 import ColorType;
-import Params;
+import BDPTParams;
+import PathData;
 
 // Shared memory variables.
 // TODO: Can we declare these inside PathGenerator?
@@ -75,7 +76,12 @@ struct PathGenerator
     Texture2D<uint> sampleCount;                    ///< Optional input sample count buffer. Only valid when kSamplesPerPixel == 0.
     RWTexture2D<uint> sampleOffset;                 ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
 
-    RWStructuredBuffer<ColorType> sampleColor;      ///< Output per-sample color if kSamplesPerPixel != 1.
+    RWStructuredBuffer<ColorType> sampleColor;          ///< Output per-sample color if kSamplesPerPixel != 1.
+    RWStructuredBuffer<Vertex> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
+
+    RWStructuredBuffer<uint> LightPathsIndexBuffer;
+
+    RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
     //RWStructuredBuffer<GuideData> sampleGuideData;  ///< Output per-sample guide data.
     //NRDBuffers outputNRD;                           ///< Output NRD data.
 

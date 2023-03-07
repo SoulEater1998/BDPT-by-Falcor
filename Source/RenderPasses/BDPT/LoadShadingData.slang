@@ -30,7 +30,7 @@ __exported import Scene.Shading;
 import Scene.Material.ShadingUtils;
 import Rendering.Materials.TexLODHelpers;
 import Utils.Math.MathHelpers;
-import Params;
+import BDPTParams;
 
 /** Compute derivatives at primary triangle hit.
 */

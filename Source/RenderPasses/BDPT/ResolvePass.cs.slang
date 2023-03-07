@@ -28,7 +28,7 @@
 //import RenderPasses.Shared.Denoising.NRDData;
 import ColorType;
 //import GuideData;
-import Params;
+import BDPTParams;
 
 /** Compute shader implementing a sample resolve pass.
 

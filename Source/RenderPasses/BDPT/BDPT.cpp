@@ -30,13 +30,18 @@
 #include "RenderGraph/RenderPassHelpers.h"
 #include "RenderGraph/RenderPassStandardFlags.h"
 #include "Rendering/Lights/EmissiveUniformSampler.h"
+//#include "PathData.slang"
 
+static const uint zero = 0;
 const RenderPass::Info BDPT::kInfo { "BDPT", "Insert pass description here." };
+
 
 namespace
 {
     const std::string kGeneratePathsFilename = "RenderPasses/BDPT/GeneratePaths.cs.slang";
     const std::string kTracePassFilename = "RenderPasses/BDPT/TracePass.rt.slang";
+    const std::string kTraceLightPathFilename = "RenderPasses/BDPT/TraceLightPath.rt.slang";
+    const std::string kTraceCameraPathFilename = "RenderPasses/BDPT/TraceCameraPath.rt.slang";
     const std::string kResolvePassFilename = "RenderPasses/BDPT/ResolvePass.cs.slang";
     const std::string kReflectTypesFile = "RenderPasses/BDPT/ReflectTypes.cs.slang";
 
@@ -429,7 +434,7 @@ void BDPT::setFrameDim(const uint2 frameDim)
     auto prevScreenTiles = mParams.screenTiles;
 
     mParams.frameDim = frameDim;
-    if (mParams.frameDim.x > kMaxFrameDimension || mParams.frameDim.y > kMaxFrameDimension)
+    if (mParams.frameDim.x > kMaxFrameDimension || mParams.frameDim.y > kMaxFrameDimensionY)
     {
         throw RuntimeError("Frame dimensions up to {} pixels width/height are supported.", kMaxFrameDimension);
     }
@@ -457,8 +462,10 @@ void BDPT::setScene(RenderContext* pRenderContext, const Scene::SharedPtr& pScen
 
     // Need to recreate the trace passes because the shader binding table changes.
     mpTracePass = nullptr;
-    mpTraceDeltaReflectionPass = nullptr;
-    mpTraceDeltaTransmissionPass = nullptr;
+    mpTraceLightPath = nullptr;
+    mpTraceCameraPath = nullptr;
+    //mpTraceDeltaReflectionPass = nullptr;
+    //mpTraceDeltaTransmissionPass = nullptr;
     mpGeneratePaths = nullptr;
     mpReflectTypes = nullptr;
 
@@ -517,8 +524,18 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     }
 
     // Trace pass.
-    FALCOR_ASSERT(mpTracePass);
-    tracePass(pRenderContext, renderData, *mpTracePass);
+    //mParams.LightPathsIndexBufferLength = 0;
+    //FALCOR_ASSERT(mpTracePass);
+    //tracePass(pRenderContext, renderData, *mpTracePass, mParams.frameDim);
+
+    // Generate light path
+    mParams.LightPathsIndexBufferLength = 0;
+    FALCOR_ASSERT(mpTraceLightPath);
+    tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
+
+    // Generate camera path
+    FALCOR_ASSERT(mpTraceCameraPath);
+    tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 
     // Launch separate passes to trace delta reflection and transmission paths to generate respective guide buffers.
     /**
@@ -530,7 +547,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     }
     */
     // Resolve pass.
-    resolvePass(pRenderContext, renderData);
+    //resolvePass(pRenderContext, renderData);
 
     endFrame(pRenderContext, renderData);
 }
@@ -960,7 +977,9 @@ bool BDPT::prepareLighting(RenderContext* pRenderContext)
     {
         lightingChanged |= mpEmissiveSampler->update(pRenderContext);
         auto defines = mpEmissiveSampler->getDefines();
-        if (mpTracePass && mpTracePass->pProgram->addDefines(defines)) mRecompile = true;
+        //if (mpTracePass && mpTracePass->pProgram->addDefines(defines)) mRecompile = true;
+        if (mpTraceLightPath && mpTraceLightPath->pProgram->addDefines(defines)) mRecompile = true;
+        if (mpTraceCameraPath && mpTraceCameraPath->pProgram->addDefines(defines)) mRecompile = true;
     }
 
     return lightingChanged;
@@ -994,7 +1013,9 @@ void BDPT::updatePrograms()
     auto globalTypeConformances = mpScene->getMaterialSystem()->getTypeConformances();
 
     // Create trace passes lazily.
-    if (!mpTracePass) mpTracePass = std::make_unique<TracePass>("tracePass", "", mpScene, defines, globalTypeConformances);
+    //if (!mpTracePass) mpTracePass = std::make_unique<TracePass>("tracePass", "", mpScene, kTracePassFilename, defines, globalTypeConformances);
+    if (!mpTraceLightPath) mpTraceLightPath = std::make_unique<TracePass>("traceLightPath", "", mpScene, kTraceLightPathFilename, defines, globalTypeConformances);
+    if (!mpTraceCameraPath) mpTraceCameraPath = std::make_unique<TracePass>("traceCameraPath", "", mpScene, kTraceCameraPathFilename, defines, globalTypeConformances);
     /*
     if (mOutputNRDAdditionalData)
     {
@@ -1004,7 +1025,9 @@ void BDPT::updatePrograms()
     */
     // Create program vars for trace programs.
     // We only need to set defines for program specialization here. Type conformances have already been setup on construction.
-    mpTracePass->prepareProgram(defines);
+    //mpTracePass->prepareProgram(defines);
+    mpTraceLightPath->prepareProgram(defines);
+    mpTraceCameraPath->prepareProgram(defines);
     //if (mpTraceDeltaReflectionPass) mpTraceDeltaReflectionPass->prepareProgram(defines);
     //if (mpTraceDeltaTransmissionPass) mpTraceDeltaTransmissionPass->prepareProgram(defines);
 
@@ -1070,6 +1093,9 @@ Program::DefineList BDPT::StaticParams::getDefines(const BDPT& owner) const
     defines.add("COLOR_FORMAT", std::to_string((uint32_t)colorFormat));
     defines.add("MIS_HEURISTIC", std::to_string((uint32_t)misHeuristic));
     defines.add("MIS_POWER_EXPONENT", std::to_string(misPowerExponent));
+    defines.add("LIGHT_PASS_WIDTH", std::to_string(lightPassWidth));
+    defines.add("LIGHT_PASS_HEIGHT", std::to_string(lightPassHeight));
+    defines.add("CANDIDATE_NUMBER", std::to_string(candidateNumber));
 
     // Sampling utilities configuration.
     FALCOR_ASSERT(owner.mpSampleGenerator);
@@ -1101,7 +1127,7 @@ Program::DefineList BDPT::StaticParams::getDefines(const BDPT& owner) const
     return defines;
 }
 
-BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefine, const Scene::SharedPtr& pScene, const Program::DefineList& defines, const Program::TypeConformanceList& globalTypeConformances)
+BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefine, const Scene::SharedPtr& pScene, const std::string& shaderFile, const Program::DefineList& defines, const Program::TypeConformanceList& globalTypeConformances)
     : name(name)
     , passDefine(passDefine)
 {
@@ -1110,7 +1136,7 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
 
     RtProgram::Desc desc;
     desc.addShaderModules(pScene->getShaderModules());
-    desc.addShaderLibrary(kTracePassFilename);
+    desc.addShaderLibrary(shaderFile);
     desc.setShaderModel(kShaderModel);
     desc.setMaxPayloadSize(160); // This is conservative but the required minimum is 140 bytes.
     desc.setMaxAttributeSize(pScene->getRaytracingMaxAttributeSize());
@@ -1212,6 +1238,13 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
             mVarsChanged = true;
         }
     }
+    //TODO: change height
+    uint32_t lightVertexElementCount = mStaticParams.lightPassWidth * mStaticParams.lightPassHeight * mStaticParams.maxSurfaceBounces;
+    uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
+    mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
     /*
     if (mOutputGuideData && (!mpSampleGuideData || mpSampleGuideData->getElementCount() < sampleCount || mVarsChanged))
     {
@@ -1243,6 +1276,7 @@ void BDPT::preparePathTracer(const RenderData& renderData)
 
     // Bind resources.
     auto var = mpPathTracerBlock->getRootVar();
+    
     setShaderData(var, renderData);
 }
 
@@ -1255,6 +1289,9 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
 
         var["sampleOffset"] = mpSampleOffset; // Can be nullptr
         var["sampleColor"] = mpSampleColor;
+        var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+        var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
+        var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
         //var["sampleGuideData"] = mpSampleGuideData;
     }
 
@@ -1319,7 +1356,7 @@ void BDPT::generatePaths(RenderContext* pRenderContext, const RenderData& render
     mpGeneratePaths->execute(pRenderContext, { mParams.screenTiles.x * tileSize, mParams.screenTiles.y, 1u });
 }
 
-void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass)
+void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim)
 {
     FALCOR_PROFILE(tracePass.name);
 
@@ -1345,7 +1382,7 @@ void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData
     var["gPathTracer"] = mpPathTracerBlock;
 
     // Full screen dispatch.
-    mpScene->raytrace(pRenderContext, tracePass.pProgram.get(), tracePass.pVars, uint3(mParams.frameDim, 1));
+    mpScene->raytrace(pRenderContext, tracePass.pProgram.get(), tracePass.pVars, uint3(dim, 1));
 }
 
 void BDPT::resolvePass(RenderContext* pRenderContext, const RenderData& renderData)
@@ -1385,6 +1422,7 @@ void BDPT::resolvePass(RenderContext* pRenderContext, const RenderData& renderDa
     {
         var["sampleOffset"] = mpSampleOffset; // Can be nullptr
         var["sampleColor"] = mpSampleColor;
+        //var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
         /*
         var["sampleGuideData"] = mpSampleGuideData;
         var["sampleNRDRadiance"] = mpSampleNRDRadiance;
@@ -1423,7 +1461,11 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     copyTexture(renderData.getTexture(kOutputPathLength).get(), mpPixelStats->getPathLengthTexture().get());
 
     if (mpRTXDI) mpRTXDI->endFrame(pRenderContext);
-
+    //mpLightPathsIndexBuffer->getUAVCounter()->
+    //uint32_t zero = 0;
+    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
+    
+    
     mVarsChanged = false;
     mParams.frameCount++;
 }
