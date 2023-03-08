@@ -529,11 +529,12 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //tracePass(pRenderContext, renderData, *mpTracePass, mParams.frameDim);
 
     // Generate light path
-    mParams.LightPathsIndexBufferLength = 0;
+    //mParams.LightPathsIndexBufferLength = 0;
     FALCOR_ASSERT(mpTraceLightPath);
     tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
 
     // Generate camera path
+    //pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
     FALCOR_ASSERT(mpTraceCameraPath);
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 
@@ -1244,6 +1245,8 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+
+    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 1);
     //var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
     /*
     if (mOutputGuideData && (!mpSampleGuideData || mpSampleGuideData->getElementCount() < sampleCount || mVarsChanged))
@@ -1463,7 +1466,7 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     if (mpRTXDI) mpRTXDI->endFrame(pRenderContext);
     //mpLightPathsIndexBuffer->getUAVCounter()->
     //uint32_t zero = 0;
-    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
+    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 1);
     
     
     mVarsChanged = false;

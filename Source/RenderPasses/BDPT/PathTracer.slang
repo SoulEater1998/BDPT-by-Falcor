@@ -93,6 +93,7 @@ struct PathTracer
     Texture2D<float3> viewDir;                      ///< Optional view direction. Only valid when kUseViewDir == true.
     Texture2D<uint> sampleCount;                    ///< Optional input sample count buffer. Only valid when kSamplesPerPixel == 0.
     Texture2D<uint> sampleOffset;                   ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
+    //Buffer<uint> LightPathsIndexBufferCount;
     
     //uint line_number;
 
@@ -1057,7 +1058,7 @@ struct PathTracer
         }
     }
 
-    void lightPathHandleHit(inout PathState path) {
+    void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq) {
         const bool isPrimaryHit = false;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
@@ -1140,6 +1141,9 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
+        //t == 1
+
+
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
         if (bs.isLobe(LobeType::Delta)) {
@@ -1150,7 +1154,8 @@ struct PathTracer
 
         LightPathsVertexsBuffer[offset - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
         LightPathsVertexsBuffer[offset] = vertex;
-        LightPathsIndexBuffer[LightPathsIndexBuffer.IncrementCounter()] = offset;
+        uint vertexID = LightPathsIndexBuffer.IncrementCounter();
+        LightPathsIndexBuffer[vertexID] = offset;
 
         const bool isLastVertex = hasFinishedSurfaceBounces(path) || path.getVertexIndex() + 1 >= kMaxSurfaceBounces;
 
@@ -1252,36 +1257,45 @@ struct PathTracer
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
         //s > 1
-        ConnectBDPT(path, vertex, vq);
+        //ConnectBDPT(path, vertex, vq);
         
         //s == 1
         bool validSample = false;
 
         // Sample a point on a light and connect it to the camera subpath
+        PathVertex pvertex = PathVertex(path.getVertexIndex(), sd.posW, sd.N, sd.faceN);
+        
         Vertex lightVertex = {};
         float3 ray_dir;
         float dirPdf;
         validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
+        
 
         if (validSample)
         {
-            float3 toLight = lightVertex.sd.posW - vertex.sd.posW;
+            float3 lightPos = computeRayOrigin(lightVertex.sd.posW, lightVertex.sd.N);
+            float3 origin = pvertex.getRayOrigin(lightPos - sd.posW);
+            float3 toLight = lightPos - origin;
             float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
             float distance = sqrt(distSqr);
             float3 dir = toLight / distance;
-            float3 origin = computeRayOrigin(vertex.sd.posW, dir);
+            //float3 origin = computeRayOrigin(vertex.sd.posW, dir);
             Ray ray = Ray(origin, dir, 0, distance);
             
+
             float3 weight = bsdf.eval(sd, dir, path.sg);
             float3 Lr = vertex.beta * weight * lightVertex.beta;
             if (any(Lr > 0.f))
             {
+                //Ray ray = ls.getVisibilityRay();
                 logTraceRay(PixelStatsRayType::Visibility);
                 bool visible = vq.traceVisibilityRay(ray);
+                //visible = true;
                 if (visible) path.L += Lr * BDPTMIS(path, lightVertex);
             }
         }
-
+        
+        
         // s == 0
         bool computeEmissive = (isPrimaryHit || kUseEmissiveLights);
         TriangleHit triangleHit = path.hit.getTriangleHit();
@@ -1292,6 +1306,7 @@ struct PathTracer
         if (computeEmissive && isTriangleHit && any(bsdfProperties.emission > 0.f) && hit.triangleIndex != LightCollection::kInvalidIndex) {
             path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit);
         }
+        
 
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
@@ -1339,7 +1354,7 @@ struct PathTracer
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
 
-        let lod = createTextureSampler(path, isPrimaryHit, isTriangleHit);
+        let lod = createTextureSampler(path, false, isTriangleHit);
 
         float3 result = sample.beta;
 
@@ -1351,7 +1366,20 @@ struct PathTracer
 
         const IBSDF bsdf1 = gScene.materials.getBSDF(sample.sd, lod);
         wo = -wo;
-        result *= bsdf1.eval(sample.sd, wo, path.sg);
+        //sample.sd.posW = cameraPathEnd.sd.posW; ///< Shading hit position in world space.
+        //sample.sd.IoR = cameraPathEnd.sd.IoR;   ///< Index of refraction for the medium on the front-facing side (i.e. "outside" the material at the hit).
+        //sample.sd.V = cameraPathEnd.sd.V;     ///< View direction, -incident direction (-ray.dir)
+        //sample.sd.opacity = cameraPathEnd.sd.opacity; ///< Opacity value in [0,1]. This is used for alpha testing.
+        //sample.sd.N = cameraPathEnd.sd.N;       ///< Shading normal at shading hit.
+        //sample.sd.materialID = cameraPathEnd.sd.materialID; ///< Material ID at shading location.
+        //sample.sd.T = cameraPathEnd.sd.T;          ///< Shading tangent at shading hit.
+        //sample.sd.curveRadius = cameraPathEnd.sd.curveRadius; ///< Curve cross-sectional radius. Valid only for geometry generated from curves.
+        //sample.sd.B = cameraPathEnd.sd.B;           ///< Shading bitangent at shading hit.
+        //sample.sd.frontFacing = cameraPathEnd.sd.frontFacing; ///< True if primitive seen from the front-facing side.
+        //sample.sd.uv = cameraPathEnd.sd.uv;          ///< Texture mapping coordinates.
+        //sample.sd.mtl = cameraPathEnd.sd.mtl;         ///< Material header data.
+        //sample.sd.faceN = cameraPathEnd.sd.faceN;
+        result *= bsdf1.eval(cameraPathEnd.sd, wo, path.sg);
 
         return result;
     }
@@ -1359,7 +1387,7 @@ struct PathTracer
     float3 G(Vertex v0, Vertex v1) {
         float3 d = v0.sd.posW - v1.sd.posW;
         float g = 1 / dot(d, d);
-        d *= sqrt(g);
+        //d *= sqrt(g);
         //g *= v0.type == VertexType::SurfaceOrMedium ? abs(dot(v0.sd.N, d)) : 1;
         //g *= v1.type == VertexType::SurfaceOrMedium ? abs(dot(v1.sd.N, d)) : 1;
         return g;
@@ -1367,30 +1395,36 @@ struct PathTracer
 
     void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq){
         // select several valid vertex from the light path
-        
+
         Reservoir r = {};
+        uint LightPathsIndexBufferLength = 64;
+        /*
         for (uint i = 0; i < kCandidateNumber; ++i) {
-            uint LightPathsIndexBufferLength = LightPathsIndexBuffer.IncrementCounter();
+
             uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1)];
             Vertex candidate = LightPathsVertexsBuffer[sampleIndex];
             float3 q = RISWeight(v, candidate, path);
             float weight = q.x + q.y + q.z;
             r.update(sampleIndex, weight, sampleNext1D(path.sg));
         }
+        */
+        uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1)];
+        Vertex sample = LightPathsVertexsBuffer[sampleIndex];
 
-        Vertex sample = LightPathsVertexsBuffer[r.sampleIndex];
-
+        
         float distance = length(v.sd.posW - sample.sd.posW);
         float3 dir = (v.sd.posW - sample.sd.posW) / distance;
         float3 origin = computeRayOrigin(sample.sd.posW, dir);
         Ray ray = Ray(origin, dir, 0, distance);
         bool visible = vq.traceVisibilityRay(ray);
 
-        float inv_M = 1 / (kLightPassHeight * kLightPassWidth);
+        float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
         float3 qs = RISWeight(v, sample, path);
         float weight_s = qs.x + qs.y + qs.z;
-        path.L += (visible) ? inv_M * v.beta * params.LightPathsIndexBufferLength * BDPTMIS(path, r.sampleIndex) * qs * r.W / (r.M * weight_s) : 0;
-
+        visible = true;
+        //path.L += (visible) ? inv_M * v.beta * LightPathsIndexBufferLength * BDPTMIS(path, r.sampleIndex) * qs * r.weightSum / (r.M * weight_s) : 0;
+        path.L +=  /*v.beta* */ qs;
+        //path.L += (visible) ? 1.0 / float(kMaxSurfaceBounces) : 0;
         CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].r = r;
     }
 

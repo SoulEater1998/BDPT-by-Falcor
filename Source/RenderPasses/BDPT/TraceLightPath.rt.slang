@@ -122,7 +122,7 @@ struct Scheduler
         gPathTracer.setupPathLogging(path);
 
         VisibilityQuery vq;
-        gPathTracer.lightPathHandleHit(path);
+        gPathTracer.lightPathHandleHit(path, vq);
 
         payload = PathPayload::pack(path);
     }
@@ -154,7 +154,7 @@ struct Scheduler
     {
         PathState path = {};
         //sample initial ray for light subpath
-        //gPathTracer.generateLightPath(pathID, path);
+        gPathTracer.generateLightPath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.
