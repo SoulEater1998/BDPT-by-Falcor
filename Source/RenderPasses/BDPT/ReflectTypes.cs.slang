@@ -41,9 +41,9 @@ ParameterBlock<PathTracer>      pathTracer;
 StructuredBuffer<ColorType>     sampleColor;
 
 //BDPT
-StructuredBuffer<Vertex>        LightPathsVertexsBuffer;
+StructuredBuffer<VertexInfo>    LightPathsVertexsBuffer;
 StructuredBuffer<CameraVertex>  CameraPathsVertexsReservoirBuffer;
 StructuredBuffer<uint>          LightPathsIndexBuffer;
-
+//StructuredBuffer<uint>          Counter;
 
 void main() {}

@@ -108,12 +108,12 @@ private:
     {
         // Rendering parameters
         uint32_t    samplesPerPixel = 1;                        ///< Number of samples (paths) per pixel, unless a sample density map is used.
-        uint32_t    maxSurfaceBounces = 0;                      ///< Max number of surface bounces (diffuse + specular + transmission), up to kMaxPathLenth. This will be initialized at startup.
+        uint32_t    maxSurfaceBounces = 5;                      ///< Max number of surface bounces (diffuse + specular + transmission), up to kMaxPathLenth. This will be initialized at startup.
         uint32_t    maxDiffuseBounces = 3;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxSpecularBounces = 3;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxTransmissionBounces = 5;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
         uint32_t    lightPassWidth = 64;                        ///<
-        uint32_t    lightPassHeight = 2;
+        uint32_t    lightPassHeight = 64;
         uint32_t    candidateNumber = 16;
 
         // Sampling parameters
@@ -192,6 +192,7 @@ private:
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
     Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
+    //Buffer::SharedPtr               mpCounter;
                                                                 /*
     Buffer::SharedPtr               mpSampleGuideData;          ///< Compact per-sample denoiser guide data.
     Buffer::SharedPtr               mpSampleNRDRadiance;        ///< Compact per-sample NRD radiance data.
