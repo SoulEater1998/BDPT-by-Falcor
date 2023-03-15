@@ -84,6 +84,17 @@ struct Reservoir
         return result;
     }
 
+    [mutating] bool combine(float dstWeight, Reservoir dstR, float rnd) {
+        weightSum += dstWeight;
+        M += dstR.M;
+        if (weightSum == 0) return false;
+        bool result = rnd < (dstWeight / weightSum);
+        if (result) {
+            sampleIndex = dstR.sampleIndex;
+        }
+        return result;
+    }
+
 };
 
 struct CameraVertex
@@ -96,6 +107,7 @@ enum class VertexFlag {
     typeMask = 0x0003,
     valid = 0x0004,
     delta = 0x0008,
+    visible = 0x0010,
 };
 
 struct VertexInfo
@@ -178,6 +190,10 @@ struct VertexInfo
         return (flagAndType & uint(VertexFlag::valid)) != 0;
     }
 
+    bool isVisible() {
+        return (flagAndType & uint(VertexFlag::visible)) != 0;
+    }
+
     VertexType getType() {
         return VertexType(flagAndType & uint(VertexFlag::typeMask));
     }
@@ -188,6 +204,15 @@ struct VertexInfo
         }
         else {
             flagAndType &= ~uint(VertexFlag::delta);
+        }
+    }
+
+    [mutating] void setVisible(bool visible) {
+        if (visible) {
+            flagAndType |= uint(VertexFlag::visible);
+        }
+        else {
+            flagAndType &= ~uint(VertexFlag::visible);
         }
     }
 };

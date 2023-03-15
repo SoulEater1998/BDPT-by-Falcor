@@ -1511,6 +1511,22 @@ struct PathTracer
         return g;
     }
 
+    Ray getVisibiliyTestRay(Vertex v, Vertex sample) {
+        PathVertex pVertexCameraSide = PathVertex(2, v.sd.posW, v.sd.N, v.sd.faceN);
+        PathVertex pVertexLigthSide = PathVertex(2, sample.sd.posW, sample.sd.N, sample.sd.faceN);
+
+        float3 cameraSideOrigin = pVertexCameraSide.getRayOrigin(sample.sd.posW - v.sd.posW);
+        float3 lightSideOrigin = pVertexLigthSide.getRayOrigin(v.sd.posW - sample.sd.posW);
+
+        float3 toLight = lightSideOrigin - cameraSideOrigin;
+        float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
+        float distance = sqrt(distSqr);
+        float3 dir = toLight / distance;
+
+        Ray ray = Ray(cameraSideOrigin, dir, 0, distance);
+        return ray;
+    }
+
     void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq){
         // select several valid vertex from the light path
 
@@ -1532,18 +1548,7 @@ struct PathTracer
             }
         }
 
-        PathVertex pVertexCameraSide = PathVertex(path.getVertexIndex(), v.sd.posW, v.sd.N, v.sd.faceN);
-        PathVertex pVertexLigthSide = PathVertex(r.sampleIndex % kMaxSurfaceBounces, sample.sd.posW, sample.sd.N, sample.sd.faceN);
-
-        float3 cameraSideOrigin = pVertexCameraSide.getRayOrigin(sample.sd.posW - v.sd.posW);
-        float3 lightSideOrigin = pVertexLigthSide.getRayOrigin(v.sd.posW - sample.sd.posW);
-
-        float3 toLight = lightSideOrigin - cameraSideOrigin;
-        float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
-        float distance = sqrt(distSqr);
-        float3 dir = toLight / distance;
-        
-        Ray ray = Ray(cameraSideOrigin, dir, 0, distance);
+        Ray ray = getVisibiliyTestRay(v, sample);
         bool visible = vq.traceVisibilityRay(ray);
 
         float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
@@ -1562,6 +1567,7 @@ struct PathTracer
         //path.L += validHit ? qs : 0;
         //path.L += (visible) ? 1.0 / float(kMaxSurfaceBounces) : 0;
         CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].r = r;
+        CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.setVisible(visible);
     }
 
     float BDPTMIS(PathState path, uint sampleIndex) {
@@ -1586,7 +1592,7 @@ struct PathTracer
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
-        for (int i = t - 2; i >= 1; --i) {
+        for (int i = t - 2; i >= 0; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();
@@ -1703,7 +1709,7 @@ struct PathTracer
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
-        for (int i = t - 2; i >= 1; --i) {
+        for (int i = t - 2; i >= 0; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();
@@ -1763,7 +1769,7 @@ struct PathTracer
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
 
-        for (int i = t - 2; i >= 1; --i) {
+        for (int i = t - 2; i >= 0; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();

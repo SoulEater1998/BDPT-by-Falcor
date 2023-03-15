@@ -45,6 +45,7 @@ namespace
     const std::string kTraceCameraPathFilename = "RenderPasses/BDPT/TraceCameraPath.rt.slang";
     const std::string kResolvePassFilename = "RenderPasses/BDPT/ResolvePass.cs.slang";
     const std::string kReflectTypesFile = "RenderPasses/BDPT/ReflectTypes.cs.slang";
+    const std::string kSpatiotemporalReuseFilename = "RenderPasses/BDPT/SpatiotemporalReuse.cs.slang";
 
     const std::string kShaderModel = "6_5";
 
@@ -469,6 +470,7 @@ void BDPT::setScene(RenderContext* pRenderContext, const Scene::SharedPtr& pScen
     //mpTraceDeltaTransmissionPass = nullptr;
     mpGeneratePaths = nullptr;
     mpReflectTypes = nullptr;
+    mpSpatiotemporalReuse = nullptr;
 
     resetLighting();
 
@@ -1078,6 +1080,14 @@ void BDPT::updatePrograms()
         mpReflectTypes = ComputePass::create(desc, defines, false);
     }
     
+    if (!mpSpatiotemporalReuse)
+    {
+        Program::Desc desc = baseDesc;
+        desc.addShaderLibrary(kSpatiotemporalReuseFilename).csEntry("main");
+        mpSpatiotemporalReuse = ComputePass::create(desc, defines, false);
+    }
+    
+    
 
     // Perform program specialization.
     // Note that we must use set instead of add functions to replace any stale state.
@@ -1088,11 +1098,13 @@ void BDPT::updatePrograms()
     prepareProgram(mpGeneratePaths->getProgram());
     prepareProgram(mpResolvePass->getProgram());
     prepareProgram(mpReflectTypes->getProgram());
+    prepareProgram(mpSpatiotemporalReuse->getProgram());
 
     // Create program vars for the specialized programs.
     mpGeneratePaths->setVars(nullptr);
     mpResolvePass->setVars(nullptr);
     mpReflectTypes->setVars(nullptr);
+    mpSpatiotemporalReuse->setVars(nullptr);
 
     mVarsChanged = true;
     mRecompile = false;
@@ -1232,6 +1244,7 @@ void BDPT::TracePass::prepareProgram(const Program::DefineList& defines)
 
 void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& renderData)
 {
+    
     // Compute allocation requirements for paths and output samples.
     // Note that the sample buffers are padded to whole tiles, while the max path count depends on actual frame dimension.
     // If we don't have a fixed sample count, assume the worst case.
@@ -1256,7 +1269,7 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     }
     
     auto var = mpReflectTypes->getRootVar();
-
+    
     // Allocate per-sample buffers.
     // For the special case of fixed 1 spp, the output is written out directly and this buffer is not needed.
     if (!mFixedSampleCount || mStaticParams.samplesPerPixel > 1)
@@ -1267,16 +1280,15 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
             mVarsChanged = true;
         }
     }
+    
     //TODO: change height
     uint32_t lightVertexElementCount = mStaticParams.lightPassWidth * mStaticParams.lightPassHeight * mStaticParams.maxSurfaceBounces;
     uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
-    mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
-    mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, true);
-    mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
-    //mpCounter = Buffer::createStructured(var["Counter"], 1, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::Read, nullptr, false);
-
-    //pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
-    //var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+    if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, true);
+    if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
     /*
     if (mOutputGuideData && (!mpSampleGuideData || mpSampleGuideData->getElementCount() < sampleCount || mVarsChanged))
     {
@@ -1386,6 +1398,19 @@ void BDPT::generatePaths(RenderContext* pRenderContext, const RenderData& render
     // Launch one thread per pixel.
     // The dimensions are padded to whole tiles to allow re-indexing the threads in the shader.
     mpGeneratePaths->execute(pRenderContext, { mParams.screenTiles.x * tileSize, mParams.screenTiles.y, 1u });
+}
+
+void BDPT::spatiotemporalReuse(RenderContext* pRenderContext) {
+    FALCOR_PROFILE("spatiotemporalReuse");
+
+    auto var = mpGeneratePaths->getRootVar()["CB"]["gSpatiotemproalReuse"];
+    var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+    var["SrcCameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
+    var["DstCameraPathsVertexsReservoirBuffer"] = mpDstCameraPathsVertexsReservoirBuffer;
+
+    var["params"].setBlob(mParams);
+
+    //var["outputColor"] = renderData.getTexture(kOutputColor);
 }
 
 void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim)

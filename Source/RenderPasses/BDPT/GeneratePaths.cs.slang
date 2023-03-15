@@ -77,7 +77,7 @@ struct PathGenerator
     RWTexture2D<uint> sampleOffset;                 ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
 
     RWStructuredBuffer<ColorType> sampleColor;          ///< Output per-sample color if kSamplesPerPixel != 1.
-    RWStructuredBuffer<Vertex> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
+    RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
 
     RWStructuredBuffer<uint> LightPathsIndexBuffer;
 

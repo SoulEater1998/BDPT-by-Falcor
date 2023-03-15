@@ -103,6 +103,7 @@ private:
     void generatePaths(RenderContext* pRenderContext, const RenderData& renderData);
     void tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim);
     void resolvePass(RenderContext* pRenderContext, const RenderData& renderData);
+    void spatiotemporalReuse(RenderContext* pRenderContext);
 
     struct StaticParams
     {
@@ -198,6 +199,8 @@ private:
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
     Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
+    Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
+    Texture::SharedPtr              mpOutput;
     //Buffer::SharedPtr               mpCounter;
                                                                 /*
     Buffer::SharedPtr               mpSampleGuideData;          ///< Compact per-sample denoiser guide data.
