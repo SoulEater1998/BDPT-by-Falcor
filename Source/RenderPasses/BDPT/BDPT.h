@@ -171,6 +171,11 @@ private:
     bool                            mOptionsChanged = false;    ///< True if the config has changed since last frame.
     bool                            mGBufferAdjustShadingNormals = false; ///< True if GBuffer/VBuffer has adjusted shading normals enabled.
     bool                            mFixedSampleCount = true;   ///< True if a fixed sample count per pixel is used. Otherwise load it from the pass sample count input.
+
+    bool                            s0 = true;
+    bool                            s1 = true;
+    bool                            s2 = true;
+    bool                            t1 = false;
     //bool                            mOutputGuideData = false;   ///< True if guide data should be generated as outputs.
     //bool                            mOutputNRDData = false;     ///< True if NRD diffuse/specular data should be generated as outputs.
     //bool                            mOutputNRDAdditionalData = false;   ///< True if NRD data from delta and residual paths should be generated as designated outputs rather than being included in specular NRD outputs.
@@ -178,6 +183,7 @@ private:
     ComputePass::SharedPtr          mpGeneratePaths;            ///< Fullscreen compute pass generating paths starting at primary hits.
     ComputePass::SharedPtr          mpResolvePass;              ///< Sample resolve pass.
     ComputePass::SharedPtr          mpReflectTypes;             ///< Helper for reflecting structured buffer types.
+    ComputePass::SharedPtr          mpSpatiotemporalReuse;      
 
     std::unique_ptr<TracePass>      mpTracePass;                ///< Main trace pass.
     std::unique_ptr<TracePass>      mpTraceDeltaReflectionPass; ///< Delta reflection trace pass (for NRD).

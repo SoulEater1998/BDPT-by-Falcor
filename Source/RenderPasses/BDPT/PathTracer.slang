@@ -60,13 +60,14 @@ inline void CoordinateSystem(const float3 v1, out float3 v2, out float3 v3)
 }
 */
 static const uint tempBufferCount = 10;
-//Vertex tempVertexBuffer[tempBufferCount]; 
+//Vertex tempVertexBuffer[tempBufferCount];
 
 /** Path tracer.
 
     This implements the high-level path tracing logic and is shared among
     different scheduling implementations.
 */
+
 
 struct PathTracer
 {
@@ -1120,6 +1121,8 @@ struct PathTracer
         const IBSDF bsdf = gScene.materials.getBSDF(sd, lod);
         BSDFProperties bsdfProperties = bsdf.getProperties(sd);
 
+        const uint lobes = bsdf.getLobes(sd);
+
         // Disable specular lobes if caustics are disabled and path already contains a diffuse vertex.
         bool isSpecular = bsdfProperties.roughness <= params.specularRoughnessThreshold;
         if (kDisableCaustics && path.getBounces(BounceType::Diffuse) > 0 && isSpecular)
@@ -1142,22 +1145,71 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
-        //t == 1
+        LightPathsVertexsBuffer[offset] = VertexInfo::create(path, vertex);
+        uint vertexID = LightPathsIndexBuffer.IncrementCounter();
+        // InterlockedAdd(Counter[0], 1, vertexID);
+        LightPathsIndexBuffer[vertexID] = offset;
+
+        // t == 1
+        float3 cameraN = normalize(gScene.camera.data.cameraW);
+        float3 cameraU = normalize(gScene.camera.data.cameraU);
+        float3 cameraV = normalize(gScene.camera.data.cameraV);
+        float3 cameraPos = gScene.camera.getPosition();
+
+        float3 toCamera = cameraPos - sd.posW;
+        float3 ray_dir = normalize(toCamera);
+
+        PathVertex pvertex = PathVertex(1, sd.posW, sd.N, sd.faceN);
+        float3 origin = pvertex.getRayOrigin(ray_dir);
+        float3 toCameraRay = cameraPos - origin;
+        float distSqr = max(dot(toCameraRay, toCameraRay), kMinLightDistSqr);
+        float distance = sqrt(distSqr);
+        float3 dir = toCameraRay / distance;
+
+        float3 Lr = vertex.beta * bsdf.eval(sd, normalize(toCamera), path.sg) * dot(cameraN, -ray_dir) / distSqr;
+
+        bool validSample = true;
+
+        bool sampleUpperHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
+        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
+        bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
+        float cosTheta = dot(pvertex.normal, ray_dir);
+        // Flip the face normal to point in the same hemisphere as the shading normal.
+        float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
+        float cosThetaFace = dot(faceNormal, ray_dir);
+        if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) validSample = false;
+        if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) validSample = false;
+
+        if (params.hasFlag(BDPTFlags::t1) && any(Lr > 0) && validSample) {
+            
+            Ray ray = Ray(origin, dir, 0, distance);
+
+            logTraceRay(PixelStatsRayType::Visibility);
+            bool visible = vq.traceVisibilityRay(ray);
+
+            float d1 = dot(toCamera, cameraU) / dot(cameraU, cameraU);
+            float d2 = dot(toCamera, cameraV) / dot(cameraV, cameraV);
+            float d3 = dot(toCamera, cameraN) / dot(cameraN, cameraN);
+            float2 ndc = float2(d1 / d3, -d2 / d3);
+            float2 pixelCenter = ndc * float2(0.5, 0.5) + float2(0.5, 0.5);
+            uint2 dim = params.frameDim;
+            uint2 id = uint2(round(pixelCenter * dim));
+
+            if (visible) outputColor[id].rgb += Lr * BDPTMIS_t0(path, offset);
+        }
 
 
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
         if (bs.isLobe(LobeType::Delta)) {
             vertex.delta = true;
+            LightPathsVertexsBuffer[offset].setDelta(true);
             pdfRev = 0;
             path.pdf = 0;
         }
 
         LightPathsVertexsBuffer[offset - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
-        LightPathsVertexsBuffer[offset] = VertexInfo::create(path, vertex);
-        uint vertexID = LightPathsIndexBuffer.IncrementCounter();
-        //InterlockedAdd(Counter[0], 1, vertexID);
-        LightPathsIndexBuffer[vertexID] = offset;
+        
 
         const bool isLastVertex = hasFinishedSurfaceBounces(path) || path.getVertexIndex() + 1 >= kMaxSurfaceBounces;
 
@@ -1261,7 +1313,7 @@ struct PathTracer
         CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v = VertexInfo::create(path, vertex);
 
         //s > 1
-        ConnectBDPT(path, vertex, vq);
+        if(params.hasFlag(BDPTFlags::s2)) ConnectBDPT(path, vertex, vq);
         
         //s == 1
         //TODO:trans
@@ -1310,7 +1362,7 @@ struct PathTracer
             float3 weight = bsdf.eval(sd, ls.dir, path.sg);
             float3 Lr = vertex.beta * weight * ls.Li;
 */
-            if (any(Lr > 0.f))
+            if (params.hasFlag(BDPTFlags::s1) && any(Lr > 0.f))
             {
                 //Ray ray = ls.getVisibilityRay();
                 logTraceRay(PixelStatsRayType::Visibility);
@@ -1331,7 +1383,7 @@ struct PathTracer
         hit.normalW = sd.frontFacing ? sd.faceN : -sd.faceN;
 
         //bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
-        if (computeEmissive && any(bsdfProperties.emission > 0.f)) {
+        if (params.hasFlag(BDPTFlags::s0) && computeEmissive && any(bsdfProperties.emission > 0.f)) {
             path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit, sampleLowerHemisphere);
         }
         
@@ -1431,8 +1483,6 @@ struct PathTracer
             const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
             result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
         }
- */       
-/*
         if (sampleLowerHemisphere_lightSide &&
             (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta) &&
             sampleLowerHemisphere_cameraSide &&
@@ -1443,7 +1493,7 @@ struct PathTracer
             const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
             result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
         }
- */       
+*/       
         result *= bsdf0.eval(cameraPathEnd.sd, toSample, path.sg);
 
         result *= bsdf1.eval(sample.sd, -toSample, path.sg);
@@ -1474,7 +1524,7 @@ struct PathTracer
             uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1];
             Vertex candidate = LightPathsVertexsBuffer[sampleIndex].unpack(false);
             float3 q = RISWeight(v, candidate, path);
-            float weight = (q.x + q.y + q.z);
+            float weight = (q.x + q.y + q.z) * LightPathsIndexBufferLength;
             bool isChange = r.update(sampleIndex, weight, sampleNext1D(path.sg));
             if (isChange) {
                 sample = candidate;
@@ -1502,8 +1552,11 @@ struct PathTracer
 
         //float3 qs = RISWeight(v, sample, path);
         float weight_s = result_q.x + result_q.y + result_q.z;
-        // visible = true;
-        path.L += (visible) ? inv_M * v.beta * LightPathsIndexBufferLength * BDPTMIS(path, r.sampleIndex) * result_q * r.weightSum / (r.M * weight_s) : 0;
+        float3 f = result_q;//RISWeight(v, sample, path);
+        r.W = 1 / weight_s * (r.weightSum / r.M);
+        //visible &= LightPathsIndexBufferLength != 0;
+        path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * f * r.W : 0;
+        //path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * result_q * r.weightSum / (r.M * weight_s) : 0;
         //path.L += inv_M * v.beta * LightPathsIndexBufferLength * result_q * r.weightSum / (r.M * weight_s);
         //path.L += inv_M * v.beta * result_q * LightPathsIndexBufferLength* r.weightSum / weight_s;
         //path.L += validHit ? qs : 0;
@@ -1533,7 +1586,7 @@ struct PathTracer
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
-        for (int i = t - 2; i >= 0; --i) {
+        for (int i = t - 2; i >= 1; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();
@@ -1586,6 +1639,49 @@ struct PathTracer
         return 1.f / (1 + sumRi);
     }
 
+    float BDPTMIS_t0(PathState path, uint sampleIndex) {
+        const bool isPrimaryHit = true;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+
+        let lod = createTextureSampler(path, isPrimaryHit, isTriangleHit);
+
+        int t = 1;
+        int s = int(sampleIndex % kMaxSurfaceBounces) + 1;
+        if (s + t == 2) return 1;
+
+        float sumRi = 0;
+        float ri = 1;
+
+        Vertex pt = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
+        Vertex qs = LightPathsVertexsBuffer[sampleIndex].unpack(false);
+        Vertex qsMinus = LightPathsVertexsBuffer[sampleIndex - 1].unpack(false);
+
+        for (int i = s - 1; i >= 0; --i) {
+            VertexInfo vi = LightPathsVertexsBuffer[sampleIndex - (s - 1) + i];
+            float pdfRev = vi.pdfRev;
+            bool delta = vi.isDelta();
+            bool deltaMinus = (i == 0) ? false : LightPathsVertexsBuffer[sampleIndex - (s - 1) + (i - 1)].isDelta();
+            if (i == s - 1) {
+                pdfRev = pt.ConvertDensity(1, qs);
+                delta = false;
+            }
+            if (i == s - 2) {
+                ShadingData sdRev = qs.sd;
+                sdRev.V = normalize(qs.sd.posW - pt.sd.posW);
+                float3 wo = normalize(qsMinus.sd.posW - qs.sd.posW);
+                const IBSDF bsdf = gScene.materials.getBSDF(sdRev, lod);
+                pdfRev = qs.ConvertDensity(bsdf.evalPdf(sdRev, wo), qsMinus);
+            }
+            ri *= remap0(pdfRev) / remap0(vi.pdfFwd);
+            if (!delta && !deltaMinus) {
+                sumRi += ri;
+            }
+        }
+
+        return 1.f / (1 + sumRi);
+    }
+
     float BDPTMIS(PathState path, Vertex lightVertex) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const HitType hitType = path.hit.getType();
@@ -1607,7 +1703,7 @@ struct PathTracer
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
-        for (int i = t - 2; i >= 0; --i) {
+        for (int i = t - 2; i >= 1; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();
@@ -1641,6 +1737,8 @@ struct PathTracer
         return 1.f / (1 + sumRi);
     }
 
+
+
     float BDPTMIS(PathState path, TriangleLightHit hit, bool twoSide) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const HitType hitType = path.hit.getType();
@@ -1665,14 +1763,15 @@ struct PathTracer
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
 
-        for (int i = t - 2; i >= 0; --i) {
+        for (int i = t - 2; i >= 1; --i) {
             VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
             float pdfRev = vi.pdfRev;
             bool delta = vi.isDelta();
             bool deltaMinus = (i == 0) ? false : CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 1 - i))].v.isDelta();
             if (i == t - 2) {
                 bool upperHemisphere = path.isLightSampledUpper() && !path.isLightSampledLower();
-                pdfRev = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(path.origin, path.normal, upperHemisphere, hit);
+                float area = gScene.lightCollection.getTriangle(hit.triangleIndex).area;
+                pdfRev = getEmissiveSelectionProbability() * emissiveSampler.evalTriangleSelectionPdf(path.origin, path.normal, upperHemisphere, hit.triangleIndex) / area;
                 delta = false;
             }
             else if (i == t - 3) {

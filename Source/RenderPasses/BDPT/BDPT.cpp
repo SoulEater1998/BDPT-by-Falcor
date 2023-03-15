@@ -531,12 +531,15 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
 
     // Generate light path
     //mParams.LightPathsIndexBufferLength = 0;
-    pRenderContext->clearUAV(mpLightPathVertexBuffer->getUAV().get(), zero4);
-    pRenderContext->clearUAV(mpLightPathsIndexBuffer->getUAV().get(), zero4);
+    //pRenderContext->clearUAV(mpLightPathVertexBuffer->getUAV().get(), zero4);
+    //pRenderContext->clearUAV(mpLightPathsIndexBuffer->getUAV().get(), zero4);
+    pRenderContext->uavBarrier(mpLightPathsIndexBuffer->getUAVCounter().get());
     pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 1);
     FALCOR_ASSERT(mpTraceLightPath);
     tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
 
+    pRenderContext->uavBarrier(mpLightPathVertexBuffer.get());
+    pRenderContext->uavBarrier(mpLightPathsIndexBuffer.get());
     // Generate camera path
     pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
     FALCOR_ASSERT(mpTraceCameraPath);
@@ -553,6 +556,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     */
     // Resolve pass.
     //resolvePass(pRenderContext, renderData);
+
 
     endFrame(pRenderContext, renderData);
 }
@@ -641,6 +645,25 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
                 }
             }
         }
+    }
+
+    if (auto group = widget.group("BDPT connection"))
+    {
+        runtimeDirty |= widget.checkbox("s == 0 connection", s0);
+        widget.tooltip("Add the contribution of s=0 type to the final result.");
+        mParams.flag = s0 ? uint(BDPTFlags::s0) : 0;
+
+        runtimeDirty |= widget.checkbox("s == 1 connection", s1);
+        widget.tooltip("Add the contribution of s=1 type to the final result.");
+        mParams.flag |= s1 ? uint(BDPTFlags::s1) : 0;
+
+        runtimeDirty |= widget.checkbox("s > 1 connection", s2);
+        widget.tooltip("Add the contribution of s>1 type to the final result.");
+        mParams.flag |= s2 ? uint(BDPTFlags::s2) : 0;
+
+        runtimeDirty |= widget.checkbox("t == 1 connection", t1);
+        widget.tooltip("Add the contribution of t=1 type to the final result.");
+        mParams.flag |= t1 ? uint(BDPTFlags::t1) : 0;
     }
 
     if (auto group = widget.group("RTXDI"))
@@ -1054,6 +1077,7 @@ void BDPT::updatePrograms()
         desc.addShaderLibrary(kReflectTypesFile).csEntry("main");
         mpReflectTypes = ComputePass::create(desc, defines, false);
     }
+    
 
     // Perform program specialization.
     // Note that we must use set instead of add functions to replace any stale state.

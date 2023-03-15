@@ -66,6 +66,19 @@ __exported import Utils.Math.BitTricks;
 
 /** Path tracer parameters shared between host/device code.
 */
+
+enum class BDPTFlags
+{
+    s0 = 0x0001,
+    s1 = 0x0002,
+    s2 = 0x0004,
+    t1 = 0x0008,
+
+    all_s = 0x0007,
+    all = 0x000f,
+
+};
+
 struct PathTracerParams
 {
     int     useFixedSeed = false;       ///< Use fixed random seed. This is useful for debugging.
@@ -79,9 +92,12 @@ struct PathTracerParams
 
     uint    frameCount = 0;             ///< Frames rendered. This is used as random seed.
     uint    seed = 0;                   ///< Random seed. This will get updated from the host depending on settings.
-    uint    LightPathsIndexBufferLength;
+    uint    flag = uint(BDPTFlags::all);
     uint   _pad0;
 
+    bool hasFlag(BDPTFlags f){
+        return (flag & uint(f)) != 0;
+    }
 #ifndef HOST_CODE
     /** Computes the offset into the tiled sample buffer for a given tile.
         The samples for all pixels are stored consecutively after this offset.
