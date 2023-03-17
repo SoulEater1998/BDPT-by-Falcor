@@ -15,24 +15,26 @@ struct SpatiotemproalReuse
 
     StructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
     StructuredBuffer<CameraVertex> SrcCameraPathsVertexsReservoirBuffer;
+    Texture2D<float4> output;
+
     RWStructuredBuffer<CameraVertex> DstCameraPathsVertexsReservoirBuffer;
 
     RWTexture2D<float4> outputColor; ///< Output color.
 
-    const int screenSpaceReuseDomain = 2;
+    const int screenSpaceReuseDomain = 3;
 
     inline uint cameraPathOffset(uint2 pixel, int offset = 0) {
         uint base = (pixel.y * params.frameDim.x + pixel.x) * kMaxSurfaceBounces;
         return base + offset;
     }
 
-    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout SampleGenerator sg) {
+    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout SampleGenerator sg, bool fr0 = true, bool g = true, bool fr1 = true) {
         // RISBDPT
         let lod = ExplicitLodTextureSampler(0);
 
         float3 result = sample.beta;
 
-        result *= G(cameraPathEnd, sample);
+        result *= g ? G(cameraPathEnd, sample) : 1;
 
         const IBSDF bsdf0 = gScene.materials.getBSDF(cameraPathEnd.sd, lod);
         const IBSDF bsdf1 = gScene.materials.getBSDF(sample.sd, lod);
@@ -40,10 +42,10 @@ struct SpatiotemproalReuse
 
         const uint lobes0 = bsdf0.getLobes(cameraPathEnd.sd);
         const uint lobes1 = bsdf1.getLobes(sample.sd);
-        
-        result *= bsdf0.eval(cameraPathEnd.sd, toSample, sg);
 
-        result *= bsdf1.eval(sample.sd, -toSample, sg);
+        result *= fr0 ? bsdf0.eval(cameraPathEnd.sd, toSample, sg) : 1;
+
+        result *= fr1 ? bsdf1.eval(sample.sd, -toSample, sg) : 1;
         // result *= abs(dot(sample.sd.N, wo));
 
         return result;
@@ -161,32 +163,45 @@ struct SpatiotemproalReuse
 
         int2 ld = max(int2(pixel) - screenSpaceReuseDomain, 0);
         int2 rt = min(int2(pixel) + screenSpaceReuseDomain, int2(params.frameDim) - 1);
+        int2 dom = rt - ld;
+        float total = float((dom.x + 1) * (dom.y + 1));
 
-        Vertex resultSample = LightPathsVertexsBuffer[cv.r.sampleIndex].unpack(false);
-        float3 result_q = RISWeight(v, resultSample, sg);
+        Vertex resultSample = LightPathsVertexsBuffer[r.sampleIndex].unpack(false);
+        float3 result_q = RISWeight(v, resultSample, sg, false);
+        float result_weight = result_q.x + result_q.y + result_q.z;
         bool isChange = false;
+        uint sum = 0;
 
         for (int i = ld.x; i <= rt.x; ++i) {
             for (int j = ld.y; j <= rt.y; ++j) {
                 CameraVertex neighbor = SrcCameraPathsVertexsReservoirBuffer[cameraPathOffset(uint2(i, j), int(offset))];
                 if (!neighbor.v.isValid()) continue;
+                
                 Reservoir dstR = neighbor.r;
                 Vertex lightSample = LightPathsVertexsBuffer[dstR.sampleIndex].unpack(false);
                 //Vertex neighborVertex = neighbor.v.unpack(offset == 0);
-                float3 q = RISWeight(v, lightSample, sg);
+                float3 q = RISWeight(v, lightSample, sg, false);
                 float weight = q.x + q.y + q.z;
                 float weightSum = weight * dstR.W * dstR.M;
-                if (cv.r.combine(weightSum, dstR, sampleNext1D(sg))) {
+                if (r.combine(weightSum, dstR, sampleNext1D(sg))) {
+                    sum++;
                     resultSample = lightSample;
                     result_q = q;
+                    result_weight = weight;
                     isChange = true;
                 }
             }
         }
-
-        float weight_s = result_q.x + result_q.y + result_q.z;
-        float3 f = result_q; // RISWeight(v, sample, path);
-        r.W = 1 / weight_s * (r.weightSum / r.M);
+        if (r.weightSum == 0.f) {
+            cv.r = r;
+            cv.v.setVisible(false);
+            DstCameraPathsVertexsReservoirBuffer[cameraPathOffset(pixel, int(offset))] = cv;
+            return 0;
+        }
+        //float weight_s = result_q.x + result_q.y + result_q.z;
+        float3 f = RISWeight(v, resultSample, sg);
+        // float weight_s = f.x + f.y + f.z;
+        r.W = (r.weightSum / r.M) / result_weight;
 
         float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
         float3 Lr = inv_M * v.beta * f * r.W;
@@ -197,8 +212,9 @@ struct SpatiotemproalReuse
         }
 
         Lr *= (visible) ? BDPTMIS(pixel, int(offset), r.sampleIndex) : 0;
-        DstCameraPathsVertexsReservoirBuffer[cameraPathOffset(pixel, int(offset))] = SrcCameraPathsVertexsReservoirBuffer[cameraPathOffset(pixel, int(offset))];
-        DstCameraPathsVertexsReservoirBuffer[cameraPathOffset(pixel, int(offset))].r = r;
+        cv.r = r;
+        cv.v.setVisible(visible);
+        DstCameraPathsVertexsReservoirBuffer[cameraPathOffset(pixel, int(offset))] = cv;
 
         return Lr;
     }
@@ -206,10 +222,14 @@ struct SpatiotemproalReuse
     void execute(const uint2 pixel) {
         float3 Lr = 0;
         bool isValid = true;
-        for (uint i = 0; (i < kMaxSurfaceBounces) && isValid; ++i) {
-            Lr += SpatialReuse(pixel, i, isValid);
+        if(params.hasFlag(BDPTFlags::s2) && params.hasFlag(BDPTFlags::spatialReuse))
+        {
+            for (uint i = 0; (i < kMaxSurfaceBounces) && isValid; ++i) {
+                Lr += SpatialReuse(pixel, i, isValid);
+            }
         }
-        outputColor[pixel] += float4(Lr, 0);
+        
+        outputColor[pixel] = output[pixel] + (float4(Lr, 0));
     }
 };
 

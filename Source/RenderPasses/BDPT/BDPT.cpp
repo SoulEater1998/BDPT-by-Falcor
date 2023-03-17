@@ -500,7 +500,9 @@ void BDPT::resetLighting()
     mRecompile = true;
 }
 
+void BDPT::sortPosition(RenderContext* pRenderContext) {
 
+}
 
 void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
@@ -542,24 +544,26 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
 
     pRenderContext->uavBarrier(mpLightPathVertexBuffer.get());
     pRenderContext->uavBarrier(mpLightPathsIndexBuffer.get());
+    pRenderContext->uavBarrier(mpCameraPathsIndexBuffer->getUAVCounter().get());
+    pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
+    //pRenderContext->uavBarrier(mpMCounter.get());
     // Generate camera path
     pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
     FALCOR_ASSERT(mpTraceCameraPath);
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 
-    // Launch separate passes to trace delta reflection and transmission paths to generate respective guide buffers.
-    /**
-    if (mOutputNRDAdditionalData)
-    {
-        FALCOR_ASSERT(mpTraceDeltaReflectionPass && mpTraceDeltaTransmissionPass);
-        tracePass(pRenderContext, renderData, *mpTraceDeltaReflectionPass);
-        tracePass(pRenderContext, renderData, *mpTraceDeltaTransmissionPass);
-    }
-    */
+    pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
+    pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
+
+    
+
+    pRenderContext->uavBarrier(mpOutput.get());
+    spatiotemporalReuse(pRenderContext, renderData);
     // Resolve pass.
     //resolvePass(pRenderContext, renderData);
 
-
+    pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
+    pRenderContext->uavBarrier(mpOutput.get());
     endFrame(pRenderContext, renderData);
 }
 
@@ -576,7 +580,7 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
     widget.tooltip("Number of samples per pixel. One path is traced for each sample.\n\n"
         "When the '" + kInputSampleCount + "' input is connected, the number of samples per pixel is loaded from the texture.");
 
-    if (widget.var("Max surface bounces", mStaticParams.maxSurfaceBounces, 0u, kMaxBounces))
+    if (widget.var("Max surface bounces", mStaticParams.maxSurfaceBounces, 0u, 5u))
     {
         // Allow users to change the max surface bounce parameter in the UI to clamp all other surface bounce parameters.
         mStaticParams.maxDiffuseBounces = std::min(mStaticParams.maxDiffuseBounces, mStaticParams.maxSurfaceBounces);
@@ -587,13 +591,13 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
     widget.tooltip("Maximum number of surface bounces (diffuse + specular + transmission).\n"
         "Note that specular reflection events from a material with a roughness greater than specularRoughnessThreshold are also classified as diffuse events.");
 
-    dirty |= widget.var("Max diffuse bounces", mStaticParams.maxDiffuseBounces, 0u, kMaxBounces);
+    dirty |= widget.var("Max diffuse bounces", mStaticParams.maxDiffuseBounces, 0u, 5u);
     widget.tooltip("Maximum number of diffuse bounces.\n0 = direct only\n1 = one indirect bounce etc.");
 
-    dirty |= widget.var("Max specular bounces", mStaticParams.maxSpecularBounces, 0u, kMaxBounces);
+    dirty |= widget.var("Max specular bounces", mStaticParams.maxSpecularBounces, 0u, 5u);
     widget.tooltip("Maximum number of specular bounces.\n0 = direct only\n1 = one indirect bounce etc.");
 
-    dirty |= widget.var("Max transmission bounces", mStaticParams.maxTransmissionBounces, 0u, kMaxBounces);
+    dirty |= widget.var("Max transmission bounces", mStaticParams.maxTransmissionBounces, 0u, 5u);
     widget.tooltip("Maximum number of transmission bounces.\n0 = no transmission\n1 = one transmission bounce etc.");
 
     // Sampling options.
@@ -666,6 +670,13 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
         runtimeDirty |= widget.checkbox("t == 1 connection", t1);
         widget.tooltip("Add the contribution of t=1 type to the final result.");
         mParams.flag |= t1 ? uint(BDPTFlags::t1) : 0;
+    }
+
+    if (auto group = widget.group("Spatiotemporal reuse"))
+    {
+        runtimeDirty |= widget.checkbox("Spatial reuse", spatialReuse);
+        widget.tooltip("Enable spatial reuse.");
+        mParams.flag |= spatialReuse ? uint(BDPTFlags::spatialReuse) : 0;
     }
 
     if (auto group = widget.group("RTXDI"))
@@ -1086,9 +1097,7 @@ void BDPT::updatePrograms()
         desc.addShaderLibrary(kSpatiotemporalReuseFilename).csEntry("main");
         mpSpatiotemporalReuse = ComputePass::create(desc, defines, false);
     }
-    
-    
-
+ 
     // Perform program specialization.
     // Note that we must use set instead of add functions to replace any stale state.
     auto prepareProgram = [&](Program::SharedPtr program)
@@ -1244,7 +1253,7 @@ void BDPT::TracePass::prepareProgram(const Program::DefineList& defines)
 
 void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& renderData)
 {
-    
+    /*
     // Compute allocation requirements for paths and output samples.
     // Note that the sample buffers are padded to whole tiles, while the max path count depends on actual frame dimension.
     // If we don't have a fixed sample count, assume the worst case.
@@ -1267,9 +1276,9 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
             mVarsChanged = true;
         }
     }
-    
+    */
     auto var = mpReflectTypes->getRootVar();
-    
+    /*
     // Allocate per-sample buffers.
     // For the special case of fixed 1 spp, the output is written out directly and this buffer is not needed.
     if (!mFixedSampleCount || mStaticParams.samplesPerPixel > 1)
@@ -1280,15 +1289,18 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
             mVarsChanged = true;
         }
     }
-    
+    */
     //TODO: change height
     uint32_t lightVertexElementCount = mStaticParams.lightPassWidth * mStaticParams.lightPassHeight * mStaticParams.maxSurfaceBounces;
     uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
     if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
-    if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, true);
+    if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount);
     if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
+    //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
     /*
     if (mOutputGuideData && (!mpSampleGuideData || mpSampleGuideData->getElementCount() < sampleCount || mVarsChanged))
     {
@@ -1331,11 +1343,13 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
     {
         if (useLightSampling && mpEnvMapSampler) mpEnvMapSampler->setShaderData(var["envMapSampler"]);
 
-        var["sampleOffset"] = mpSampleOffset; // Can be nullptr
-        var["sampleColor"] = mpSampleColor;
+        //var["sampleOffset"] = mpSampleOffset; // Can be nullptr
+        //var["sampleColor"] = mpSampleColor;
         var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
         var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
         var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
+        var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
+        //var["MCounter"] = mpMCounter;
         //var["sampleGuideData"] = mpSampleGuideData;
     }
 
@@ -1360,7 +1374,7 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
     var["vbuffer"] = renderData.getTexture(kInputVBuffer);
     var["viewDir"] = pViewDir; // Can be nullptr
     var["sampleCount"] = pSampleCount; // Can be nullptr
-    var["outputColor"] = renderData.getTexture(kOutputColor);
+    var["outputColor"] = mpOutput;//renderData.getTexture(kOutputColor);
 
     if (useLightSampling && mpEmissiveSampler)
     {
@@ -1400,17 +1414,22 @@ void BDPT::generatePaths(RenderContext* pRenderContext, const RenderData& render
     mpGeneratePaths->execute(pRenderContext, { mParams.screenTiles.x * tileSize, mParams.screenTiles.y, 1u });
 }
 
-void BDPT::spatiotemporalReuse(RenderContext* pRenderContext) {
+void BDPT::spatiotemporalReuse(RenderContext* pRenderContext, const RenderData& renderData) {
     FALCOR_PROFILE("spatiotemporalReuse");
 
-    auto var = mpGeneratePaths->getRootVar()["CB"]["gSpatiotemproalReuse"];
+    auto var = mpSpatiotemporalReuse->getRootVar()["CB"]["gSpatiotemproalReuse"];
     var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
     var["SrcCameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
     var["DstCameraPathsVertexsReservoirBuffer"] = mpDstCameraPathsVertexsReservoirBuffer;
+    var["output"] = mpOutput;
 
     var["params"].setBlob(mParams);
 
-    //var["outputColor"] = renderData.getTexture(kOutputColor);
+    var["outputColor"] = renderData.getTexture(kOutputColor);
+
+    mpSpatiotemporalReuse["gScene"] = mpScene->getParameterBlock();
+
+    mpSpatiotemporalReuse->execute(pRenderContext, { mParams.frameDim, 1u });
 }
 
 void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim)
@@ -1520,7 +1539,8 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     if (mpRTXDI) mpRTXDI->endFrame(pRenderContext);
     //mpLightPathsIndexBuffer->getUAVCounter()->
     //uint32_t zero = 0;
-    //pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
+    pRenderContext->clearUAV(mpCameraPathsVertexsReservoirBuffer->getUAV().get(), zero4);
+    pRenderContext->clearUAV(mpOutput->getUAV().get(), zero4);
     
     
     mVarsChanged = false;

@@ -105,7 +105,8 @@ struct PathTracer
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
     RWStructuredBuffer<uint> LightPathsIndexBuffer;
-    //RWStructuredBuffer<uint> Counter;
+    RWStructuredBuffer<float4> CameraPathsIndexBuffer;
+    //RWStructuredBuffer<uint> MCounter;
 
     RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
    
@@ -1147,8 +1148,8 @@ struct PathTracer
 
         LightPathsVertexsBuffer[offset] = VertexInfo::create(path, vertex);
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
-        // InterlockedAdd(Counter[0], 1, vertexID);
         LightPathsIndexBuffer[vertexID] = offset;
+        //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         // t == 1
         float3 cameraN = normalize(gScene.camera.data.cameraW);
@@ -1310,10 +1311,13 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
-        CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v = VertexInfo::create(path, vertex);
+        uint offset = cameraPathOffset(path);
+        CameraPathsVertexsReservoirBuffer[offset].v = VertexInfo::create(path, vertex);
+        uint vertexID = CameraPathsIndexBuffer.IncrementCounter();
+        CameraPathsIndexBuffer[vertexID] = float4(vertex.sd.posW, asfloat(offset));
 
         //s > 1
-        if(params.hasFlag(BDPTFlags::s2)) ConnectBDPT(path, vertex, vq);
+        ConnectBDPT(path, vertex, vq);
         
         //s == 1
         //TODO:trans
@@ -1431,7 +1435,7 @@ struct PathTracer
         return base + path.getVertexIndex() - 1 + offset;
     }
 
-    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout PathState path) {
+    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout PathState path, bool fr0 = true, bool g = true, bool fr1 = true) {
         // RISBDPT
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const HitType hitType = path.hit.getType();
@@ -1440,65 +1444,67 @@ struct PathTracer
         let lod = createTextureSampler(path, false, isTriangleHit);
 
         float3 result = sample.beta;
+        //f = result;
 
-        result *= G(cameraPathEnd, sample);
-
+        result *= g ? G(cameraPathEnd, sample) : 1;
+        //f *= G(cameraPathEnd, sample);
         const IBSDF bsdf0 = gScene.materials.getBSDF(cameraPathEnd.sd, lod);
         const IBSDF bsdf1 = gScene.materials.getBSDF(sample.sd, lod);
         float3 toSample = normalize(sample.sd.posW - cameraPathEnd.sd.posW);
 
         const uint lobes0 = bsdf0.getLobes(cameraPathEnd.sd);
         const uint lobes1 = bsdf1.getLobes(sample.sd);
-/*
-        bool sampleUpperHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaReflection) != 0);
-        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere_cameraSide = false;
-        bool sampleLowerHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaTransmission) != 0);
-        float cosTheta_cameraSide = dot(cameraPathEnd.sd.N, toSample);
-        // Flip the face normal to point in the same hemisphere as the shading normal.
-        float3 faceNormal_cameraSide = sign(dot(cameraPathEnd.sd.N, cameraPathEnd.sd.faceN)) * cameraPathEnd.sd.faceN;
-        float cosThetaFace_cameraSide = dot(faceNormal_cameraSide, toSample);
-        if (!sampleUpperHemisphere_cameraSide && (max(cosTheta_cameraSide, cosThetaFace_cameraSide) >= -kMinCosTheta)) return 0;
-        if (!sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta)) return 0;
+        /*
+                bool sampleUpperHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaReflection) != 0);
+                if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere_cameraSide = false;
+                bool sampleLowerHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaTransmission) != 0);
+                float cosTheta_cameraSide = dot(cameraPathEnd.sd.N, toSample);
+                // Flip the face normal to point in the same hemisphere as the shading normal.
+                float3 faceNormal_cameraSide = sign(dot(cameraPathEnd.sd.N, cameraPathEnd.sd.faceN)) * cameraPathEnd.sd.faceN;
+                float cosThetaFace_cameraSide = dot(faceNormal_cameraSide, toSample);
+                if (!sampleUpperHemisphere_cameraSide && (max(cosTheta_cameraSide, cosThetaFace_cameraSide) >= -kMinCosTheta)) return 0;
+                if (!sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta)) return 0;
 
-        bool sampleUpperHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaReflection) != 0);
-        bool sampleLowerHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaTransmission) != 0);
-        float cosTheta_lightSide = dot(sample.sd.N, -toSample);
-        // Flip the face normal to point in the same hemisphere as the shading normal.
-        float3 faceNormal_lightSide = sign(dot(sample.sd.N, sample.sd.faceN)) * sample.sd.faceN;
-        float cosThetaFace_lightSide = dot(faceNormal_lightSide, -toSample);
-        if (!sampleUpperHemisphere_lightSide && (max(cosTheta_lightSide, cosThetaFace_lightSide) >= -kMinCosTheta)) return 0;
-        if (!sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta)) return 0;
+                bool sampleUpperHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaReflection) != 0);
+                bool sampleLowerHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaTransmission) != 0);
+                float cosTheta_lightSide = dot(sample.sd.N, -toSample);
+                // Flip the face normal to point in the same hemisphere as the shading normal.
+                float3 faceNormal_lightSide = sign(dot(sample.sd.N, sample.sd.faceN)) * sample.sd.faceN;
+                float cosThetaFace_lightSide = dot(faceNormal_lightSide, -toSample);
+                if (!sampleUpperHemisphere_lightSide && (max(cosTheta_lightSide, cosThetaFace_lightSide) >= -kMinCosTheta)) return 0;
+                if (!sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta)) return 0;
 
-        bool cameraSideTrans = sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta);
-        bool lightSideTrans = sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta);
-        bool sameMaterial = cameraPathEnd.sd.materialID == sample.sd.materialID;
+                bool cameraSideTrans = sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta);
+                bool lightSideTrans = sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta);
+                bool sameMaterial = cameraPathEnd.sd.materialID == sample.sd.materialID;
 
-        if (cameraSideTrans) {
-            const uint materialID = cameraPathEnd.sd.materialID;
-            const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-            result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-        }
-        else if (lightSideTrans) {
-            const uint materialID = sample.sd.materialID;
-            const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-            result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-        }
-        if (sampleLowerHemisphere_lightSide &&
-            (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta) &&
-            sampleLowerHemisphere_cameraSide &&
-            (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta) &&
-            cameraPathEnd.sd.materialID == sample.sd.materialID)
-        {
-            const uint materialID = cameraPathEnd.sd.materialID;
-            const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-            result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-        }
-*/       
-        result *= bsdf0.eval(cameraPathEnd.sd, toSample, path.sg);
-
-        result *= bsdf1.eval(sample.sd, -toSample, path.sg);
+                if (cameraSideTrans) {
+                    const uint materialID = cameraPathEnd.sd.materialID;
+                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
+                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
+                }
+                else if (lightSideTrans) {
+                    const uint materialID = sample.sd.materialID;
+                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
+                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
+                }
+                if (sampleLowerHemisphere_lightSide &&
+                    (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta) &&
+                    sampleLowerHemisphere_cameraSide &&
+                    (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta) &&
+                    cameraPathEnd.sd.materialID == sample.sd.materialID)
+                {
+                    const uint materialID = cameraPathEnd.sd.materialID;
+                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
+                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
+                }
+        */
+        result *= fr0 ? bsdf0.eval(cameraPathEnd.sd, toSample, path.sg) : 1;
+        //f *= bsdf0.eval(cameraPathEnd.sd, toSample, path.sg);
+        result *= fr1 ? bsdf1.eval(sample.sd, -toSample, path.sg) : 1;
+        //f *= bsdf1.eval(sample.sd, -toSample, path.sg);
         //result *= abs(dot(sample.sd.N, wo));
-
+        
         return result;
     }
 
@@ -1530,37 +1536,51 @@ struct PathTracer
     void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq){
         // select several valid vertex from the light path
 
-        Reservoir r = {};
+        Reservoir r = Reservoir::init();
         uint LightPathsIndexBufferLength = LightPathsIndexBuffer[0] - 1;
         Vertex sample;
         float3 result_q;
-
+        bool validSample = false;
+        //float3 f;
         for (uint i = 0; i < kCandidateNumber; ++i) {
 
             uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1];
             Vertex candidate = LightPathsVertexsBuffer[sampleIndex].unpack(false);
-            float3 q = RISWeight(v, candidate, path);
+            float3 q = RISWeight(v, candidate, path, false);
             float weight = (q.x + q.y + q.z) * LightPathsIndexBufferLength;
+
             bool isChange = r.update(sampleIndex, weight, sampleNext1D(path.sg));
+            //isChange = false;
+            /*
             if (isChange) {
                 sample = candidate;
                 result_q = q;
             }
+            */
         }
+
+        sample = LightPathsVertexsBuffer[r.sampleIndex].unpack(false);
+        result_q = RISWeight(v, sample, path, false);
+        if (r.weightSum == 0.f || r.sampleIndex % kMaxSurfaceBounces == 0) {
+            CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].r = r;
+            CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.setVisible(false);
+            //path.L += 1.0 / kMaxSurfaceBounces;
+            return;
+        }
+        //else return;
 
         Ray ray = getVisibiliyTestRay(v, sample);
         bool visible = vq.traceVisibilityRay(ray);
 
         float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
 
-        //Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
-
-        //float3 qs = RISWeight(v, sample, path);
+        // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
+        // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
+        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, r.sampleIndex);
         float weight_s = result_q.x + result_q.y + result_q.z;
-        float3 f = result_q;//RISWeight(v, sample, path);
         r.W = 1 / weight_s * (r.weightSum / r.M);
-        //visible &= LightPathsIndexBufferLength != 0;
-        path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * f * r.W : 0;
+        // visible = true;
+        path.L += (params.hasFlag(BDPTFlags::s2) && !params.hasFlag(BDPTFlags::spatialReuse) && visible) ? inv_M * v.beta * f * r.W : 0;
         //path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * result_q * r.weightSum / (r.M * weight_s) : 0;
         //path.L += inv_M * v.beta * LightPathsIndexBufferLength * result_q * r.weightSum / (r.M * weight_s);
         //path.L += inv_M * v.beta * result_q * LightPathsIndexBufferLength* r.weightSum / weight_s;

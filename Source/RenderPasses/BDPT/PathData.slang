@@ -73,26 +73,39 @@ struct Reservoir
     uint M = 0; // The number of samples seen so far
     float W = 0; // The total weight
 
+    static Reservoir init() {
+        Reservoir r = {};
+        r.sampleIndex = 0;
+        r.weightSum = 0;
+        r.M = 0; // The number of samples seen so far
+        r.W = 0;
+        return r;
+    }
+
     [mutating] bool update(uint dstSample, float weight, float rnd) {
-        weightSum += weight;
         M += 1;
+        weightSum += weight;
         if (weightSum == 0) return false;
-        bool result = rnd < (weight / weightSum);
-        if (result) {
+        if (rnd < (weight / weightSum)) {
             sampleIndex = dstSample;
+            return true;
         }
-        return result;
+        else {
+            return false;
+        }
     }
 
     [mutating] bool combine(float dstWeight, Reservoir dstR, float rnd) {
         weightSum += dstWeight;
         M += dstR.M;
         if (weightSum == 0) return false;
-        bool result = rnd < (dstWeight / weightSum);
-        if (result) {
+        if (rnd < (dstWeight / weightSum)) {
             sampleIndex = dstR.sampleIndex;
+            return true;
         }
-        return result;
+        else {
+            return false;
+        }
     }
 
 };

@@ -103,7 +103,8 @@ private:
     void generatePaths(RenderContext* pRenderContext, const RenderData& renderData);
     void tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim);
     void resolvePass(RenderContext* pRenderContext, const RenderData& renderData);
-    void spatiotemporalReuse(RenderContext* pRenderContext);
+    void spatiotemporalReuse(RenderContext* pRenderContext, const RenderData& renderData);
+    void sortPosition(RenderContext* pRenderContext);
 
     struct StaticParams
     {
@@ -177,6 +178,7 @@ private:
     bool                            s1 = true;
     bool                            s2 = true;
     bool                            t1 = false;
+    bool                            spatialReuse = true;
     //bool                            mOutputGuideData = false;   ///< True if guide data should be generated as outputs.
     //bool                            mOutputNRDData = false;     ///< True if NRD diffuse/specular data should be generated as outputs.
     //bool                            mOutputNRDAdditionalData = false;   ///< True if NRD data from delta and residual paths should be generated as designated outputs rather than being included in specular NRD outputs.
@@ -199,7 +201,9 @@ private:
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
     Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
+    Buffer::SharedPtr               mpCameraPathsIndexBuffer;
     Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
+    //Buffer::SharedPtr               mpMCounter;
     Texture::SharedPtr              mpOutput;
     //Buffer::SharedPtr               mpCounter;
                                                                 /*

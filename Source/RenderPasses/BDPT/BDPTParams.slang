@@ -77,6 +77,10 @@ enum class BDPTFlags
     all_s = 0x0007,
     all = 0x000f,
 
+    spatialReuse = 0x0010,
+    temporalReuse = 0x0020,
+    spatiotemporalReuse = 0x0030,
+
 };
 
 struct PathTracerParams
