@@ -22,8 +22,10 @@ groupshared float3 sdata[groupDim_x];
 void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID)
 {
     int tid = GTid.x;
-    int i = Gid.x * 2 * groupDim_x + tid;
+    int i = (Gid.x + Gid.y * 64) * 2 * groupDim_x + tid;
 
+    if (i >= n) return;
+    
     sdata[tid] = (i + groupDim_x >= n) ? g_data[i].xyz : max(g_data[i].xyz, g_data[i + groupDim_x].xyz);
 
     int numGroupActives = n - 2 * groupDim_x * Gid.x;

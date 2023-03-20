@@ -555,7 +555,9 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
     pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
 
-    
+    //mordenCodePass->execute(pRenderContext);
+    //sortPass->setListCount(mordenCodePass->getPositionBufferCount());
+    //sortPass->sort(pRenderContext);
 
     pRenderContext->uavBarrier(mpOutput.get());
     spatiotemporalReuse(pRenderContext, renderData);
@@ -1057,6 +1059,7 @@ void BDPT::updatePrograms()
     //if (!mpTracePass) mpTracePass = std::make_unique<TracePass>("tracePass", "", mpScene, kTracePassFilename, defines, globalTypeConformances);
     if (!mpTraceLightPath) mpTraceLightPath = std::make_unique<TracePass>("traceLightPath", "", mpScene, kTraceLightPathFilename, defines, globalTypeConformances);
     if (!mpTraceCameraPath) mpTraceCameraPath = std::make_unique<TracePass>("traceCameraPath", "", mpScene, kTraceCameraPathFilename, defines, globalTypeConformances);
+    
     /*
     if (mOutputNRDAdditionalData)
     {
@@ -1299,6 +1302,10 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
     if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
+    //if (!KeyIndexList) KeyIndexList = Buffer::createStructured(sizeof(uint64_t), cameraVertexElementCount);
+
+    //if (!mordenCodePass) mordenCodePass = std::make_unique<MordenCodeSort>(mpCameraPathsIndexBuffer, KeyIndexList, cameraVertexElementCount);
+    //if (!sortPass) sortPass = std::make_unique<Bitonic64Sort>(KeyIndexList, 0);
     //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
     /*

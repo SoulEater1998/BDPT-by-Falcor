@@ -6,7 +6,7 @@
 StructuredBuffer<float4> Positions : register(t0);
 StructuredBuffer<float4> Bound;
 RWByteAddressBuffer keyIndexList : register(u0);
-#define DEFAULT_BLOCK_SIZE 512
+#define DEFAULT_BLOCK_SIZE 1024
 cbuffer CSConstants
 {
     uint num;
@@ -28,15 +28,16 @@ void main(uint3 DTid : SV_DispatchThreadID)
 {
     float3 corner = Bound[0].xyz;
     float3 dimension = Bound[1].xyz;
-    if (DTid.x < num)
+    uint i = DTid.x + DTid.y * 64 * DEFAULT_BLOCK_SIZE;
+    if (i < num)
     {
 		//normalize position to [0,1]
-        float3 normPos = (Positions[DTid.x].xyz - corner) / dimension;
+        float3 normPos = (Positions[i].xyz - corner) / dimension;
         uint3 quantPos = min(max(0, uint3(normPos * quantLevels)), quantLevels - 1);
         quantPos = BitExpansion(quantPos);
         uint mortonCode = quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
 
-        uint2 KeyIndexPair = uint2(DTid.x, mortonCode);
-        keyIndexList.Store2(8 * DTid.x, KeyIndexPair);
+        uint2 KeyIndexPair = uint2(i, mortonCode);
+        keyIndexList.Store2(8 * i, KeyIndexPair);
     }
 }

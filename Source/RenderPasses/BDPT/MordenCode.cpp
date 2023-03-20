@@ -1,3 +1,7 @@
+// Copyright (c) 2022, Fengqi Liu <M202173624@hust.edu.cn>
+// All rights reserved.
+// This code is licensed under the MIT License (MIT).
+
 #include "MordenCode.h"
 
 static const float4 kClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -16,18 +20,21 @@ namespace
 
 }
 
-MordenCodeSort::MordenCodeSort(Buffer::SharedPtr& _positionBuffer, uint _positionBufferUpbound) : positionBuffer(_positionBuffer), positionBufferUpbound(_positionBufferUpbound){
+MordenCodeSort::MordenCodeSort(Buffer::SharedPtr& _positionBuffer, Buffer::SharedPtr& _resultBuffer, uint _positionBufferUpbound)
+            : positionBuffer(_positionBuffer), KeyIndexList(_resultBuffer),positionBufferUpbound(_positionBufferUpbound){
     positionBufferCount = 0;
+    groupSize = 1024;
 
     FindMax = ComputePass::create(kFindMaxPositionFilename, "main");
     FindMin = ComputePass::create(kFindMinPositionFilename, "main");
     GenMordenCode = ComputePass::create(kGenMordenCodeFilename, "main");
 
     positionBound = Buffer::createStructured(sizeof(float4), 2);
-    KeyIndexList = Buffer::createStructured(sizeof(uint64_t), positionBufferUpbound);
 
-    bboxReductionBuffer[0] = Buffer::createStructured(sizeof(float4), positionBufferUpbound);
-    bboxReductionBuffer[1] = Buffer::createStructured(sizeof(float4), positionBufferUpbound);
+    uint maxNumGroups = (positionBufferUpbound + 2047) / 2048;
+    uint maxNumGroups_2 = (maxNumGroups + 2047) / 2048;
+    bboxReductionBuffer[0] = Buffer::createStructured(sizeof(float4), maxNumGroups_2);
+    bboxReductionBuffer[1] = Buffer::createStructured(sizeof(float4), maxNumGroups);
 
     FindMax["SceneBoundBuffer"] = positionBound;
     FindMin["SceneBoundBuffer"] = positionBound;
@@ -50,6 +57,23 @@ void MordenCodeSort::execute(RenderContext* pRenderContext) {
     GenerateMordenCode(pRenderContext);
 }
 
+uint3 MordenCodeSort::GetDimension(uint threadNum) {
+    
+    if (threadNum < 1024 * groupSize) {
+        return uint3(threadNum, 1, 1);
+    }
+    /*
+    uint groupNum = (positionBufferCount + 1023) / 1024;
+    double x_p = std::sqrt(groupNum);
+    uint xg = uint(x_p + 1);
+    uint yg = (groupNum + xg - 1) / xg;
+    return uint3(xg * 1024, yg, 1);
+    */
+    uint xt = 64 * groupSize;
+    uint yt = (threadNum + xt - 1) / xt;
+    return uint3(xt, yt, 1);
+}
+
 void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
     
 
@@ -62,7 +86,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
     FindMax["g_odata"] = bboxReductionBuffer[1];
 
     pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
-    FindMax->execute(pRenderContext, uint3(positionBufferCount, 1, 1));
+    FindMax->execute(pRenderContext, GetDimension((positionBufferCount + 1) / 2));
     if (positionBufferCount > 2048) {
         FindMax["consts"]["n"] = numGroups;
         FindMax["consts"]["isLastPass"] = !largeNum;
@@ -71,7 +95,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
 
         pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
         pRenderContext->uavBarrier(bboxReductionBuffer[0].get());
-        FindMax->execute(pRenderContext, uint3(numGroups, 1, 1));
+        FindMax->execute(pRenderContext, GetDimension((numGroups + 1) / 2));
     }
     if (largeNum) {
         uint numGroups_2 = (numGroups + 2047) / 2048;
@@ -82,7 +106,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
 
         pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
         pRenderContext->uavBarrier(bboxReductionBuffer[0].get());
-        FindMax->execute(pRenderContext, uint3(numGroups_2, 1, 1));
+        FindMax->execute(pRenderContext, GetDimension((numGroups_2 + 1) / 2));
     }
 
     FindMin["consts"]["n"] = positionBufferCount;
@@ -92,7 +116,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
 
     pRenderContext->uavBarrier(positionBound.get());
     pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
-    FindMin->execute(pRenderContext, uint3(positionBufferCount, 1, 1));
+    FindMin->execute(pRenderContext, GetDimension((positionBufferCount + 1) / 2));
     if (positionBufferCount > 2048) {
         FindMin["consts"]["n"] = numGroups;
         FindMin["consts"]["isLastPass"] = !largeNum;
@@ -101,7 +125,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
 
         pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
         pRenderContext->uavBarrier(bboxReductionBuffer[0].get());
-        FindMin->execute(pRenderContext, uint3(numGroups, 1, 1));
+        FindMin->execute(pRenderContext, GetDimension((numGroups + 1) / 2));
     }
     if (largeNum) {
         uint numGroups_2 = (numGroups + 2047) / 2048;
@@ -113,7 +137,7 @@ void MordenCodeSort::FindBoundingBox(RenderContext* pRenderContext) {
         pRenderContext->uavBarrier(bboxReductionBuffer[1].get());
         pRenderContext->uavBarrier(bboxReductionBuffer[0].get());
         
-        FindMin->execute(pRenderContext, uint3(numGroups_2, 1, 1));
+        FindMin->execute(pRenderContext, GetDimension((numGroups_2 + 1) / 2));
     }
 
     //auto vplbound = (float4*)VPLsBound->map(Buffer::MapType::Read);
@@ -131,6 +155,6 @@ void MordenCodeSort::GenerateMordenCode(RenderContext* pRenderContext) {
     var1["quantLevels"] = quantLevels;
 
     pRenderContext->uavBarrier(positionBound.get());
-    GenMordenCode->execute(pRenderContext, uint3(positionBufferCount, 1, 1));
+    GenMordenCode->execute(pRenderContext, GetDimension(positionBufferCount));
 }
 

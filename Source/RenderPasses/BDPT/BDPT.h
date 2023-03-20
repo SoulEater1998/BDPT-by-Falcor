@@ -39,6 +39,10 @@
 
 #include "BDPTParams.slang"
 
+#include "MordenCode.h"
+#include "Bitonic64Sort.h"
+
+
 using namespace Falcor;
 
 class BDPT : public RenderPass
@@ -194,6 +198,9 @@ private:
     std::unique_ptr<TracePass>      mpTraceLightPath;           ///< Generate light path (for BDPT).
     std::unique_ptr<TracePass>      mpTraceCameraPath;          ///< Generate camera path (for BDPT).
 
+    std::unique_ptr<MordenCodeSort> mordenCodePass;
+    std::unique_ptr<Bitonic64Sort>  sortPass;
+
     Texture::SharedPtr              mpSampleOffset;             ///< Output offset into per-sample buffers to where the samples for each pixel are stored (the offset is relative the start of the tile). Only used with non-fixed sample count.
     Buffer::SharedPtr               mpSampleColor;              ///< Compact per-sample color buffer. This is used only if spp > 1.
 
@@ -203,6 +210,7 @@ private:
     Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
     Buffer::SharedPtr               mpCameraPathsIndexBuffer;
     Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
+    Buffer::SharedPtr               KeyIndexList;
     //Buffer::SharedPtr               mpMCounter;
     Texture::SharedPtr              mpOutput;
     //Buffer::SharedPtr               mpCounter;
