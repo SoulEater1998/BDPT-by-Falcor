@@ -544,16 +544,16 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
 
     pRenderContext->uavBarrier(mpLightPathVertexBuffer.get());
     pRenderContext->uavBarrier(mpLightPathsIndexBuffer.get());
-    pRenderContext->uavBarrier(mpCameraPathsIndexBuffer->getUAVCounter().get());
-    pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
+    //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer->getUAVCounter().get());
+    //pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
     //pRenderContext->uavBarrier(mpMCounter.get());
     // Generate camera path
     pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
     FALCOR_ASSERT(mpTraceCameraPath);
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 
-    pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
-    pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
+    //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
+    //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
 
     
 
@@ -562,7 +562,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     // Resolve pass.
     //resolvePass(pRenderContext, renderData);
 
-    pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
+    //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
     pRenderContext->uavBarrier(mpOutput.get());
     endFrame(pRenderContext, renderData);
 }
@@ -1295,10 +1295,10 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
     if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount);
-    if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
-    if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
-    if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
+    //if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
     //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
     /*
@@ -1347,8 +1347,8 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
         //var["sampleColor"] = mpSampleColor;
         var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
         var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
-        var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
-        var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
+        //var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
+        //var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
         //var["MCounter"] = mpMCounter;
         //var["sampleGuideData"] = mpSampleGuideData;
     }
@@ -1419,8 +1419,8 @@ void BDPT::spatiotemporalReuse(RenderContext* pRenderContext, const RenderData& 
 
     auto var = mpSpatiotemporalReuse->getRootVar()["CB"]["gSpatiotemproalReuse"];
     var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
-    var["SrcCameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
-    var["DstCameraPathsVertexsReservoirBuffer"] = mpDstCameraPathsVertexsReservoirBuffer;
+    //var["SrcCameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
+    //var["DstCameraPathsVertexsReservoirBuffer"] = mpDstCameraPathsVertexsReservoirBuffer;
     var["output"] = mpOutput;
 
     var["params"].setBlob(mParams);
@@ -1539,7 +1539,7 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     if (mpRTXDI) mpRTXDI->endFrame(pRenderContext);
     //mpLightPathsIndexBuffer->getUAVCounter()->
     //uint32_t zero = 0;
-    pRenderContext->clearUAV(mpCameraPathsVertexsReservoirBuffer->getUAV().get(), zero4);
+    //pRenderContext->clearUAV(mpCameraPathsVertexsReservoirBuffer->getUAV().get(), zero4);
     pRenderContext->clearUAV(mpOutput->getUAV().get(), zero4);
     
     

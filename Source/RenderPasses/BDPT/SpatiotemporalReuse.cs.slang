@@ -222,14 +222,15 @@ struct SpatiotemproalReuse
     void execute(const uint2 pixel) {
         float3 Lr = 0;
         bool isValid = true;
+        /*
         if(params.hasFlag(BDPTFlags::s2) && params.hasFlag(BDPTFlags::spatialReuse))
         {
             for (uint i = 0; (i < kMaxSurfaceBounces) && isValid; ++i) {
                 Lr += SpatialReuse(pixel, i, isValid);
             }
         }
-        
-        outputColor[pixel] = output[pixel] + (float4(Lr, 0));
+        */
+        outputColor[pixel] = output[pixel];// + (float4(Lr, 0));
     }
 };
 

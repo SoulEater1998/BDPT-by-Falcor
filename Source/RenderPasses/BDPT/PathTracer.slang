@@ -105,10 +105,10 @@ struct PathTracer
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
     RWStructuredBuffer<uint> LightPathsIndexBuffer;
-    RWStructuredBuffer<float4> CameraPathsIndexBuffer;
+    //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 
-    RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
+    //RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
    
     /*******************************************************************
                                 Static members
@@ -1220,9 +1220,10 @@ struct PathTracer
         
     }
 
-    void CameraPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq)
+    void CameraPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout Vertex cameraPath[6])
     {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const uint index = path.getVertexIndex() - 1;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
         const bool isCurveHit = kUseCurves && (hitType == HitType::Curve);
@@ -1277,7 +1278,7 @@ struct PathTracer
             prev = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
         else {
-            prev = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -1)].v.unpack(isPrimaryHit);
+            prev = cameraPath[index - 1];
         }
     
         Vertex vertex = Vertex::create(sd, path.thp, path.pdf, 0, VertexType::SurfaceOrMedium);
@@ -1311,13 +1312,10 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
-        uint offset = cameraPathOffset(path);
-        CameraPathsVertexsReservoirBuffer[offset].v = VertexInfo::create(path, vertex);
-        uint vertexID = CameraPathsIndexBuffer.IncrementCounter();
-        CameraPathsIndexBuffer[vertexID] = float4(vertex.sd.posW, asfloat(offset));
+        cameraPath[index] = vertex;
 
         //s > 1
-        ConnectBDPT(path, vertex, vq);
+        ConnectBDPT(path, vertex, vq, cameraPath);
         
         //s == 1
         //TODO:trans
@@ -1372,7 +1370,7 @@ struct PathTracer
                 logTraceRay(PixelStatsRayType::Visibility);
                 bool visible = vq.traceVisibilityRay(ray);
                 // visible = true;
-                if (visible) path.L += Lr * BDPTMIS(path, lightVertex);
+                if (visible) path.L += Lr * BDPTMIS(path, cameraPath, lightVertex);
             }
         }
         
@@ -1388,7 +1386,7 @@ struct PathTracer
 
         //bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
         if (params.hasFlag(BDPTFlags::s0) && computeEmissive && any(bsdfProperties.emission > 0.f)) {
-            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit, sampleLowerHemisphere);
+            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, cameraPath, hit, sampleLowerHemisphere);
         }
         
         
@@ -1396,13 +1394,13 @@ struct PathTracer
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
         if (bs.isLobe(LobeType::Delta)) {
-            CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.setDelta(true);
+            cameraPath[index].delta = true;
             vertex.delta = true;
             pdfRev = 0;
             path.pdf = 0;
         }
 
-        CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -1)].v.pdfRev = vertex.ConvertDensity(pdfRev, prev);
+        cameraPath[index - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
         
         
 
@@ -1533,7 +1531,7 @@ struct PathTracer
         return ray;
     }
 
-    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq){
+    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in Vertex cameraPath[6]){
         // select several valid vertex from the light path
 
         Reservoir r = Reservoir::init();
@@ -1562,9 +1560,6 @@ struct PathTracer
         sample = LightPathsVertexsBuffer[r.sampleIndex].unpack(false);
         result_q = RISWeight(v, sample, path, false);
         if (r.weightSum == 0.f || r.sampleIndex % kMaxSurfaceBounces == 0) {
-            CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].r = r;
-            CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.setVisible(false);
-            //path.L += 1.0 / kMaxSurfaceBounces;
             return;
         }
         //else return;
@@ -1576,7 +1571,7 @@ struct PathTracer
 
         // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
         // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
-        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, r.sampleIndex);
+        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, r.sampleIndex);
         float weight_s = result_q.x + result_q.y + result_q.z;
         r.W = 1 / weight_s * (r.weightSum / r.M);
         // visible = true;
@@ -1586,12 +1581,11 @@ struct PathTracer
         //path.L += inv_M * v.beta * result_q * LightPathsIndexBufferLength* r.weightSum / weight_s;
         //path.L += validHit ? qs : 0;
         //path.L += (visible) ? 1.0 / float(kMaxSurfaceBounces) : 0;
-        CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].r = r;
-        CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.setVisible(visible);
     }
 
-    float BDPTMIS(PathState path, uint sampleIndex) {
+    float BDPTMIS(PathState path, Vertex cameraPath[6], uint sampleIndex) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const uint index = path.getVertexIndex() - 1;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
 
@@ -1602,21 +1596,21 @@ struct PathTracer
         float sumRi = 0;
         float ri = 1;
 
-        Vertex pt = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(isPrimaryHit);
+        Vertex pt = cameraPath[index];
         Vertex qs = LightPathsVertexsBuffer[sampleIndex].unpack(false);
         Vertex qsMinus = LightPathsVertexsBuffer[sampleIndex - 1].unpack(false);
         Vertex ptMinus;
         if (t - 2 > 0) {
-            ptMinus = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -1)].v.unpack(path.getVertexIndex() - 1 == 1);
+            ptMinus = cameraPath[index - 1];
         }
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
         for (int i = t - 2; i >= 0; --i) {
-            VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
+            Vertex vi = cameraPath[i];
             float pdfRev = vi.pdfRev;
-            bool delta = vi.isDelta();
-            bool deltaMinus = (i == 0) ? false : CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 1 - i))].v.isDelta();
+            bool delta = vi.delta;
+            bool deltaMinus = (i == 0) ? false : cameraPath[i - 1].delta;
             if (i == t - 2) {
                 float3 wo = normalize(pt.sd.posW - qs.sd.posW);
                 const IBSDF bsdf = gScene.materials.getBSDF(qs.sd, lod);
@@ -1708,8 +1702,9 @@ struct PathTracer
         return 1.f / (1 + sumRi);
     }
 
-    float BDPTMIS(PathState path, Vertex lightVertex) {
+    float BDPTMIS(PathState path, Vertex cameraPath[6], Vertex lightVertex) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const uint index = path.getVertexIndex() - 1;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
 
@@ -1720,20 +1715,20 @@ struct PathTracer
         float sumRi = 0;
         float ri = 1;
 
-        Vertex pt = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(isPrimaryHit);
+        Vertex pt = cameraPath[index];
         Vertex qs = lightVertex;
         Vertex ptMinus;
         if (t - 2 > 0) {
-            ptMinus = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -1)].v.unpack(path.getVertexIndex() - 1 == 1);
+            ptMinus = cameraPath[index - 1];
         }
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
         for (int i = t - 2; i >= 0; --i) {
-            VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
+            Vertex vi = cameraPath[i];
             float pdfRev = vi.pdfRev;
-            bool delta = vi.isDelta();
-            bool deltaMinus = (i == 0) ? false : CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 1 - i))].v.isDelta();
+            bool delta = vi.delta;
+            bool deltaMinus = (i == 0) ? false : cameraPath[i - 1].delta;
             if (i == t - 2) {
                 float3 dir = normalize(pt.sd.posW - lightVertex.sd.posW);
                 float3 n = normalize(lightVertex.sd.N);
@@ -1763,10 +1758,9 @@ struct PathTracer
         return 1.f / (1 + sumRi);
     }
 
-
-
-    float BDPTMIS(PathState path, TriangleLightHit hit, bool twoSide) {
+    float BDPTMIS(PathState path, Vertex cameraPath[6], TriangleLightHit hit, bool twoSide) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const uint index = path.getVertexIndex() - 1;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
 
@@ -1780,20 +1774,20 @@ struct PathTracer
         float sumRi = 0;
         float ri = 1;
 
-        Vertex pt = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(isPrimaryHit);
+        Vertex pt = cameraPath[index];
         Vertex ptMinus;
         if (t - 2 > 0) {
-            ptMinus = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -1)].v.unpack(path.getVertexIndex() - 1 == 1);
+            ptMinus = cameraPath[index - 1];
         }
         else {
             ptMinus = Vertex::createCamera(gScene.camera.getPosition(), gScene.camera.data.cameraW);
         }
 
         for (int i = t - 2; i >= 0; --i) {
-            VertexInfo vi = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 2 - i))].v;
+            Vertex vi = cameraPath[i];
             float pdfRev = vi.pdfRev;
-            bool delta = vi.isDelta();
-            bool deltaMinus = (i == 0) ? false : CameraPathsVertexsReservoirBuffer[cameraPathOffset(path, -int(t - 1 - i))].v.isDelta();
+            bool delta = vi.delta;
+            bool deltaMinus = (i == 0) ? false : cameraPath[i - 1].delta;
             if (i == t - 2) {
                 bool upperHemisphere = path.isLightSampledUpper() && !path.isLightSampledLower();
                 float area = gScene.lightCollection.getTriangle(hit.triangleIndex).area;

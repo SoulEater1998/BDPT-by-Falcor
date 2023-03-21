@@ -9,6 +9,7 @@ import RenderPasses.Shared.Denoising.NRDConstants;
 import Utils.Math.PackedFormats;
 import Utils.Math.FormatConversion;
 import PathTracer;
+import PathData;
 
 ParameterBlock<PathTracer> gPathTracer;
 Scheduler gScheduler;
@@ -102,8 +103,8 @@ struct Scheduler
         path.sceneLength = float16_t(kNRDInvalidPathLength);
 
         gPathTracer.setupPathLogging(path);
-        //gPathTracer.BDPTHandleMiss(path);
-        gPathTracer.handleMiss(path);
+        gPathTracer.BDPTHandleMiss(path);
+        //gPathTracer.handleMiss(path);
 
         payload = PathPayload::pack(path);
     }
@@ -126,8 +127,8 @@ struct Scheduler
 #elif defined(DELTA_TRANSMISSION_PASS)
         gPathTracer.handleDeltaTransmissionHit(path);
 #else
-        VisibilityQuery vq;
-        gPathTracer.CameraPathHandleHit(path, vq);
+        //VisibilityQuery vq;
+        //gPathTracer.CameraPathHandleHit(path, vq);
         //gPathTracer.handleHit(path, vq);
 #endif
 
@@ -138,7 +139,7 @@ struct Scheduler
         This replaces `PathTracer::nextHit` but without support for volume sampling.
         \param[in,out] path Path state.
     */
-    void nextHit(inout PathState path)
+    void nextHit(inout PathState path, inout Vertex cameraPath[6])
     {
         // Advance to next path vertex.
         path.incrementVertexIndex();
@@ -152,6 +153,11 @@ struct Scheduler
         TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, kRayTypeScatter /* hitIdx */, rayTypeCount, kMissScatter /* missIdx */, ray.toRayDesc(), payload);
 
         path = PathPayload::unpack(payload);
+        if (path.isActive()) {
+            VisibilityQuery vq;
+            gPathTracer.CameraPathHandleHit(path, vq, cameraPath);
+        }
+        
     }
 
     /** Traces a path and write result to output.
@@ -160,7 +166,7 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
-
+        Vertex cameraPath[6];
         gPathTracer.generatePath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
@@ -173,8 +179,8 @@ struct Scheduler
             gPathTracer.handleDeltaTransmissionHit(path);
 #else
             VisibilityQuery vq;
-            //path.setVertexIndex(0);
-            gPathTracer.CameraPathHandleHit(path, vq);
+            // path.setVertexIndex(0);
+            gPathTracer.CameraPathHandleHit(path, vq, cameraPath);
             //gPathTracer.handleHit(path, vq);
 #endif
         }
@@ -189,7 +195,7 @@ struct Scheduler
         
         while (path.isActive())
         {
-            nextHit(path);
+            nextHit(path, cameraPath);
         }
         
         #if !defined(DELTA_REFLECTION_PASS) && !defined(DELTA_TRANSMISSION_PASS)

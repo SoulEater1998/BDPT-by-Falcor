@@ -200,9 +200,9 @@ private:
     //BDPT
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
-    Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
-    Buffer::SharedPtr               mpCameraPathsIndexBuffer;
-    Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
+    //Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
+    //Buffer::SharedPtr               mpCameraPathsIndexBuffer;
+    //Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
     //Buffer::SharedPtr               mpMCounter;
     Texture::SharedPtr              mpOutput;
     //Buffer::SharedPtr               mpCounter;

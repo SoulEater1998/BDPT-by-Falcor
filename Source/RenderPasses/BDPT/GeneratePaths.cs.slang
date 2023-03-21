@@ -80,10 +80,10 @@ struct PathGenerator
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
 
     RWStructuredBuffer<uint> LightPathsIndexBuffer;
-    StructuredBuffer<float4> CameraPathsIndexBuffer;
+    //StructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 
-    RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
+    //RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
     //RWStructuredBuffer<GuideData> sampleGuideData;  ///< Output per-sample guide data.
     //NRDBuffers outputNRD;                           ///< Output NRD data.
 
