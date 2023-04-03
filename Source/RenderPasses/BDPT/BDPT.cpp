@@ -558,7 +558,8 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     
 
     pRenderContext->uavBarrier(mpOutput.get());
-    spatiotemporalReuse(pRenderContext, renderData);
+    pRenderContext->copyResource(renderData.getTexture(kOutputColor).get(), mpOutput.get());
+    //spatiotemporalReuse(pRenderContext, renderData);
     // Resolve pass.
     //resolvePass(pRenderContext, renderData);
 

@@ -1571,10 +1571,12 @@ struct PathTracer
 
         // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
         // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
+        //cameraPath[5].valid = false;
         float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, r.sampleIndex);
         float weight_s = result_q.x + result_q.y + result_q.z;
         r.W = 1 / weight_s * (r.weightSum / r.M);
         // visible = true;
+        //path.L += (cameraPath[5].valid) ? 1 : 0;
         path.L += (params.hasFlag(BDPTFlags::s2) && !params.hasFlag(BDPTFlags::spatialReuse) && visible) ? inv_M * v.beta * f * r.W : 0;
         //path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * result_q * r.weightSum / (r.M * weight_s) : 0;
         //path.L += inv_M * v.beta * LightPathsIndexBufferLength * result_q * r.weightSum / (r.M * weight_s);
@@ -1583,7 +1585,7 @@ struct PathTracer
         //path.L += (visible) ? 1.0 / float(kMaxSurfaceBounces) : 0;
     }
 
-    float BDPTMIS(PathState path, Vertex cameraPath[6], uint sampleIndex) {
+    float BDPTMIS(PathState path, in Vertex cameraPath[6], uint sampleIndex) {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const uint index = path.getVertexIndex() - 1;
         const HitType hitType = path.hit.getType();
@@ -1595,6 +1597,8 @@ struct PathTracer
         int s = int(sampleIndex % kMaxSurfaceBounces) + 1;
         float sumRi = 0;
         float ri = 1;
+
+        //cameraPath[2] = cameraPath[index];
 
         Vertex pt = cameraPath[index];
         Vertex qs = LightPathsVertexsBuffer[sampleIndex].unpack(false);
@@ -1655,7 +1659,7 @@ struct PathTracer
                 sumRi += ri;
             }
         }
-        
+        //cameraPath[5].valid = true;
         return 1.f / (1 + sumRi);
     }
 
