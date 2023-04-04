@@ -1572,7 +1572,7 @@ struct PathTracer
         // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
         // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
         //cameraPath[5].valid = false;
-        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, r.sampleIndex);
+        float3 f = RISWeight(v, sample, path); //* BDPTMIS(path, cameraPath, r.sampleIndex);
         float weight_s = result_q.x + result_q.y + result_q.z;
         r.W = 1 / weight_s * (r.weightSum / r.M);
         // visible = true;
