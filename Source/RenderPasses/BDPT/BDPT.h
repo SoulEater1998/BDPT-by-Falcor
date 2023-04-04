@@ -114,8 +114,8 @@ private:
         uint32_t    maxDiffuseBounces = 3;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxSpecularBounces = 3;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxTransmissionBounces = 5;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
-        uint32_t    lightPassWidth = 16;                        ///<
-        uint32_t    lightPassHeight = 16;
+        uint32_t    lightPassWidth = 64;                        ///<
+        uint32_t    lightPassHeight = 64;
         uint32_t    candidateNumber = 16;
 
         // Sampling parameters

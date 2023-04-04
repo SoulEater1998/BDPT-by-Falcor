@@ -1370,7 +1370,7 @@ struct PathTracer
                 logTraceRay(PixelStatsRayType::Visibility);
                 bool visible = vq.traceVisibilityRay(ray);
                 // visible = true;
-                if (visible) path.L += Lr * BDPTMIS(path, cameraPath, lightVertex);
+                if (visible) path.L += Lr  * BDPTMIS(path, cameraPath, lightVertex);
             }
         }
         
@@ -1386,7 +1386,7 @@ struct PathTracer
 
         //bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
         if (params.hasFlag(BDPTFlags::s0) && computeEmissive && any(bsdfProperties.emission > 0.f)) {
-            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, cameraPath, hit, sampleLowerHemisphere);
+            path.L += vertex.beta * bsdfProperties.emission  * BDPTMIS(path, cameraPath, hit, sampleLowerHemisphere);
         }
         
         
@@ -1571,8 +1571,8 @@ struct PathTracer
 
         // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
         // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
-        //cameraPath[5].valid = false;
-        float3 f = RISWeight(v, sample, path); //* BDPTMIS(path, cameraPath, r.sampleIndex);
+        // cameraPath[5].valid = false;
+        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, r.sampleIndex);
         float weight_s = result_q.x + result_q.y + result_q.z;
         r.W = 1 / weight_s * (r.weightSum / r.M);
         // visible = true;
@@ -1597,7 +1597,7 @@ struct PathTracer
         int s = int(sampleIndex % kMaxSurfaceBounces) + 1;
         float sumRi = 0;
         float ri = 1;
-
+        //return 1.f / (s + t - 1);
         //cameraPath[2] = cameraPath[index];
 
         Vertex pt = cameraPath[index];
@@ -1718,6 +1718,7 @@ struct PathTracer
         int s = 1;
         float sumRi = 0;
         float ri = 1;
+        //return 1.f / (s + t - 1);
 
         Vertex pt = cameraPath[index];
         Vertex qs = lightVertex;
@@ -1774,6 +1775,7 @@ struct PathTracer
         //if (t == 3) return 1.; 
         int s = 0;
         if (s + t == 2) return 1.;
+        //return 1.f / (s + t - 1);
 
         float sumRi = 0;
         float ri = 1;
