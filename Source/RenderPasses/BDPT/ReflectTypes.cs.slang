@@ -44,7 +44,7 @@ StructuredBuffer<ColorType>     sampleColor;
 StructuredBuffer<VertexInfo>    LightPathsVertexsBuffer;
 //StructuredBuffer<CameraVertex>  CameraPathsVertexsReservoirBuffer;
 StructuredBuffer<CameraVertex>  DstCameraPathsVertexsReservoirBuffer;
-StructuredBuffer<uint>          LightPathsIndexBuffer;
+StructuredBuffer<uint2>          LightPathsIndexBuffer;
 //StructuredBuffer<float4>        CameraPathsIndexBuffer;
 //StructuredBuffer<uint>          MCounter;
 //StructuredBuffer<uint>          Counter;

@@ -83,7 +83,9 @@ struct PathTracer
         [mutating] bool traceVisibilityRay(const Ray ray);
     };
 
-    PathTracerParams params;                        ///< Runtime parameters.
+    PathTracerParams params; ///< Runtime parameters.
+    float3 corner;
+    float3 dimension;
     //RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
     EnvMapSampler envMapSampler;                    ///< Environment map sampler. Only valid when kUseEnvLight == true.
@@ -104,7 +106,7 @@ struct PathTracer
     RWTexture2D<float4> outputColor;                      ///< Output color buffer if kSamplesPerPixel == 1.
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
-    RWStructuredBuffer<uint> LightPathsIndexBuffer;
+    RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 
@@ -1059,6 +1061,20 @@ struct PathTracer
         {
             path.terminate();
         }
+    }
+
+    inline uint3 BitExpansion(uint3 x)
+    {
+        // https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+        x = (x | x << 16) & 0x30000ff;
+        x = (x | x << 8) & 0x300f00f;
+        x = (x | x << 4) & 0x30c30c3;
+        x = (x | x << 2) & 0x9249249;
+        return x;
+    }
+
+    uint GenMortonCode(float3 pos) {
+
     }
 
     void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq) {
