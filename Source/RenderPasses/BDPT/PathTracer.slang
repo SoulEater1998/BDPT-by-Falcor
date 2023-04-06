@@ -1152,6 +1152,7 @@ struct PathTracer
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         // t == 1
+/*
         float3 cameraN = normalize(gScene.camera.data.cameraW);
         float3 cameraU = normalize(gScene.camera.data.cameraU);
         float3 cameraV = normalize(gScene.camera.data.cameraV);
@@ -1198,11 +1199,11 @@ struct PathTracer
 
             if (visible) outputColor[id].rgb += Lr * BDPTMIS_t0(path, offset);
         }
-
+*/
 
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
-        if (bs.isLobe(LobeType::Delta)) {
+        if (((lobes & (uint)LobeType::DeltaReflection) != 0) || ((lobes & (uint)LobeType::DeltaTransmission) != 0)) {
             vertex.delta = true;
             LightPathsVertexsBuffer[offset].setDelta(true);
             pdfRev = 0;
@@ -1314,8 +1315,21 @@ struct PathTracer
 
         cameraPath[index] = vertex;
 
+        if (((lobes & (uint)LobeType::DeltaReflection) != 0) || ((lobes & (uint)LobeType::DeltaTransmission) != 0)) {
+            cameraPath[index].delta = true;
+            vertex.delta = true;
+            pdfRev = 0;
+            path.pdf = 0;
+        }
+
+        cameraPath[index - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
+
+        bool sampleUpperHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
+        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
+        bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
+
         //s > 1
-        ConnectBDPT(path, vertex, vq, cameraPath);
+        ConnectBDPT(path, vertex, vq, cameraPath, sampleUpperHemisphere, sampleLowerHemisphere);
         
         //s == 1
         //TODO:trans
@@ -1330,9 +1344,7 @@ struct PathTracer
         validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
         
 
-        bool sampleUpperHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
-        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
-        bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
+       
         float cosTheta = dot(pvertex.normal, ray_dir);
         // Flip the face normal to point in the same hemisphere as the shading normal.
         float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
@@ -1393,14 +1405,9 @@ struct PathTracer
 
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
-        if (bs.isLobe(LobeType::Delta)) {
-            cameraPath[index].delta = true;
-            vertex.delta = true;
-            pdfRev = 0;
-            path.pdf = 0;
-        }
+        
 
-        cameraPath[index - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
+        
         
         
 
@@ -1531,21 +1538,33 @@ struct PathTracer
         return ray;
     }
 
-    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in Vertex cameraPath[6]){
+    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in Vertex cameraPath[6], in bool sampleUpperHemisphere, in bool sampleLowerHemisphere){
         // select several valid vertex from the light path
 
         Reservoir r = Reservoir::init();
         uint LightPathsIndexBufferLength = LightPathsIndexBuffer[0] - 1;
         Vertex sample;
         float3 result_q;
-        bool validSample = false;
+        //bool validSample = false;
         //float3 f;
         for (uint i = 0; i < kCandidateNumber; ++i) {
 
             uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1];
             Vertex candidate = LightPathsVertexsBuffer[sampleIndex].unpack(false);
             float3 q = RISWeight(v, candidate, path, false);
-            float weight = (q.x + q.y + q.z) * LightPathsIndexBufferLength;
+            Ray ray = getVisibiliyTestRay(v, candidate);
+
+            float cosTheta = dot(v.sd.N, ray.dir);
+            // Flip the face normal to point in the same hemisphere as the shading normal.
+            float3 faceNormal = sign(dot(v.sd.N, v.sd.faceN)) * v.sd.faceN;
+            float cosThetaFace = dot(faceNormal, ray.dir);
+            if ((!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) || (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta))) {
+                r.M++;
+                continue;
+            }
+            
+            bool visible = vq.traceVisibilityRay(ray);
+            float weight = (visible) ? (q.x + q.y + q.z) * LightPathsIndexBufferLength : 0;
 
             bool isChange = r.update(sampleIndex, weight, sampleNext1D(path.sg));
             //isChange = false;

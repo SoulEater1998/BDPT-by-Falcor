@@ -116,7 +116,7 @@ private:
         uint32_t    maxTransmissionBounces = 5;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
         uint32_t    lightPassWidth = 64;                        ///<
         uint32_t    lightPassHeight = 64;
-        uint32_t    candidateNumber = 16;
+        uint32_t    candidateNumber = 8;
 
         // Sampling parameters
         uint32_t    sampleGenerator = SAMPLE_GENERATOR_TINY_UNIFORM; ///< Pseudorandom sample generator type.
