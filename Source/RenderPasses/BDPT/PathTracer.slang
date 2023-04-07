@@ -60,6 +60,7 @@ inline void CoordinateSystem(const float3 v1, out float3 v2, out float3 v3)
 }
 */
 static const uint tempBufferCount = 10;
+static const uint quantLevels = 1 << 10;
 //Vertex tempVertexBuffer[tempBufferCount];
 
 /** Path tracer.
@@ -1074,7 +1075,11 @@ struct PathTracer
     }
 
     uint GenMortonCode(float3 pos) {
-
+        
+        float3 normPos = (pos - corner) / dimension;
+        uint3 quantPos = min(max(0, uint3(normPos * quantLevels)), quantLevels - 1);
+        quantPos = BitExpansion(quantPos);
+        return quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
     }
 
     void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq) {
@@ -1164,7 +1169,8 @@ struct PathTracer
 
         LightPathsVertexsBuffer[offset] = VertexInfo::create(path, vertex);
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
-        LightPathsIndexBuffer[vertexID] = offset;
+        uint mortonCode = GenMortonCode(vertex.sd.posW);
+        LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         // t == 1
@@ -1558,14 +1564,14 @@ struct PathTracer
         // select several valid vertex from the light path
 
         Reservoir r = Reservoir::init();
-        uint LightPathsIndexBufferLength = LightPathsIndexBuffer[0] - 1;
+        uint LightPathsIndexBufferLength = LightPathsIndexBuffer[0].x - 1;
         Vertex sample;
         float3 result_q;
         //bool validSample = false;
         //float3 f;
         for (uint i = 0; i < kCandidateNumber; ++i) {
 
-            uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1];
+            uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1].x;
             Vertex candidate = LightPathsVertexsBuffer[sampleIndex].unpack(false);
             float3 q = RISWeight(v, candidate, path, false);
             Ray ray = getVisibiliyTestRay(v, candidate);

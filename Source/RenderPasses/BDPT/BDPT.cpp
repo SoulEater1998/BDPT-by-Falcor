@@ -1333,7 +1333,8 @@ void BDPT::preparePathTracer(const RenderData& renderData)
 
     // Bind resources.
     auto var = mpPathTracerBlock->getRootVar();
-    
+    var["corner"] = mpScene->getSceneBounds().minPoint;
+    var["dimension"] = mpScene->getSceneBounds().maxPoint - mpScene->getSceneBounds().minPoint;
     setShaderData(var, renderData);
 }
 
