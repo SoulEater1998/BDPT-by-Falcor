@@ -6,6 +6,8 @@ namespace
     const std::string kBitonic64PreSortFilename = "RenderPasses/BDPT/Bitonic64PreSortCS.slang";
     const std::string kBitonic64OuterSortFilename = "RenderPasses/BDPT/Bitonic64OuterSortCS.slang";
     const std::string kBitonic64InnerSortFilename = "RenderPasses/BDPT/Bitonic64InnerSortCS.slang";
+    const std::string kSortTestFilename = "RenderPasses/BDPT/SortTest.cs.slang";
+    const std::string kMapPassFilename = "RenderPasses/BDPT/Map.cs.slang";
 }
 
 Bitonic64Sort::Bitonic64Sort(Buffer::SharedPtr& _KeyIndexList, uint _listCount) :KeyIndexList(_KeyIndexList), listCount(_listCount) {
@@ -15,6 +17,8 @@ Bitonic64Sort::Bitonic64Sort(Buffer::SharedPtr& _KeyIndexList, uint _listCount) 
     Bitonic64PreSortCS = ComputePass::create(kBitonic64PreSortFilename, "main");
     Bitonic64OuterSortCS = ComputePass::create(kBitonic64OuterSortFilename, "main");
     Bitonic64InnerSortCS = ComputePass::create(kBitonic64InnerSortFilename, "main");
+    SortTestCS = ComputePass::create(kSortTestFilename, "main");
+    MapCS = ComputePass::create(kMapPassFilename, "main");
 
     DispatchArgs = Buffer::createStructured(sizeof(uint3), 22 * 23 / 2, ResourceBindFlags::UnorderedAccess | ResourceBindFlags::IndirectArg);
     //Sort
@@ -22,6 +26,7 @@ Bitonic64Sort::Bitonic64Sort(Buffer::SharedPtr& _KeyIndexList, uint _listCount) 
     Bitonic64PreSortCS["g_SortBuffer"] = KeyIndexList;
     Bitonic64OuterSortCS["g_SortBuffer"] = KeyIndexList;
     Bitonic64InnerSortCS["g_SortBuffer"] = KeyIndexList;
+    SortTestCS["keyIndexList"] = KeyIndexList;
 }
 
 void Bitonic64Sort::sort(RenderContext* pRenderContext) {
@@ -64,4 +69,10 @@ void Bitonic64Sort::sort(RenderContext* pRenderContext) {
         //pRenderContext->uavBarrier(KeyIndexList.get());
         IndirectArgsOffset += 12;
     }
+}
+
+void Bitonic64Sort::sortTest(RenderContext* pRenderContext, Texture::SharedPtr& _output, uint2 frameDim) {
+    SortTestCS["gOutput"] = _output;
+    SortTestCS["CSConstants"]["totalNum"] = listCount;
+    SortTestCS->execute(pRenderContext, uint3(frameDim, 1));
 }

@@ -8,6 +8,7 @@ struct Bitonic64Sort
     Bitonic64Sort(Buffer::SharedPtr& _KeyIndexList, uint _listCount);
     void sort(RenderContext* pRenderContext);
     void setListCount(uint _listCount) { listCount = _listCount; };
+    void sortTest(RenderContext* pRenderContext, Texture::SharedPtr& _output, uint2 frameDim);
     //Buffer::SharedPtr
 
 private:
@@ -21,4 +22,6 @@ private:
     ComputePass::SharedPtr Bitonic64PreSortCS;
     ComputePass::SharedPtr Bitonic64OuterSortCS;
     ComputePass::SharedPtr Bitonic64InnerSortCS;
+    ComputePass::SharedPtr SortTestCS;
+    ComputePass::SharedPtr MapCS;
 };

@@ -538,7 +538,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //pRenderContext->clearUAV(mpLightPathVertexBuffer->getUAV().get(), zero4);
     //pRenderContext->clearUAV(mpLightPathsIndexBuffer->getUAV().get(), zero4);
     pRenderContext->uavBarrier(mpLightPathsIndexBuffer->getUAVCounter().get());
-    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 1);
+    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
     FALCOR_ASSERT(mpTraceLightPath);
     tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
 
@@ -548,7 +548,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
     //pRenderContext->uavBarrier(mpMCounter.get());
     // Generate camera path
-    pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
+    //pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
     FALCOR_ASSERT(mpTraceCameraPath);
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 

@@ -37,6 +37,7 @@
 #include "Rendering/Utils/PixelStats.h"
 #include "Rendering/RTXDI/RTXDI.h"
 
+#include "Bitonic64Sort.h"
 #include "BDPTParams.slang"
 
 using namespace Falcor;
@@ -200,6 +201,7 @@ private:
     //BDPT
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
+    Buffer::SharedPtr               KeyIndexList;
     //Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
     //Buffer::SharedPtr               mpCameraPathsIndexBuffer;
     //Buffer::SharedPtr               mpDstCameraPathsVertexsReservoirBuffer;
