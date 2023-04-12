@@ -42,6 +42,7 @@ import Utils.Math.MathHelpers;
 import LoadShadingData;
 import ColorType;
 import PathData;
+import Node;
 __exported import PathState;
 __exported import BDPTParams;
 
@@ -86,6 +87,7 @@ struct PathTracer
 
     PathTracerParams params; ///< Runtime parameters.
     float3 corner;
+    uint leafNodeStart;
     float3 dimension;
     //RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
@@ -97,6 +99,7 @@ struct PathTracer
     Texture2D<float3> viewDir;                      ///< Optional view direction. Only valid when kUseViewDir == true.
     Texture2D<uint> sampleCount;                    ///< Optional input sample count buffer. Only valid when kSamplesPerPixel == 0.
     Texture2D<uint> sampleOffset;                   ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
+    StructuredBuffer<Node> nodes;
     //Buffer<uint> LightPathsIndexBufferCount;
     
     //uint line_number;
@@ -108,6 +111,7 @@ struct PathTracer
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
+    RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
     //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 
@@ -1171,6 +1175,7 @@ struct PathTracer
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
         uint mortonCode = GenMortonCode(vertex.sd.posW);
         LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
+        LightPathsVertexsPositionBuffer[offset] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta) : 0);
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         // t == 1
@@ -1560,70 +1565,132 @@ struct PathTracer
         return ray;
     }
 
+    inline bool firstChildWeight(Vertex v, inout float prob0, inout PathState path, int child0, int child1)
+    {
+        Node c0 = nodes[child0];
+        Node c1 = nodes[child1];
+        // TODO: avoid "if"
+        float c0_intensity = c0.betaSum;
+        float c1_intensity = c1.betaSum;
+
+        if (c0_intensity == 0)
+        {
+            if (c1_intensity == 0)
+                return false;
+            prob0 = 0;
+            return true;
+        }
+        else if (c1_intensity == 0)
+        {
+            prob0 = 1;
+            return true;
+        }
+
+        float3 c0_boundMin = c0.boundMin;
+        float3 c0_boundMax = c0.boundMax;
+        float3 c1_boundMin = c1.boundMin;
+        float3 c1_boundMax = c1.boundMax;
+
+        // Compute the weights
+
+        float geom0 = 1;
+        float geom1 = 1;
+        float3 p = v.sd.posW;
+        float3 N = v.sd.N;
+        geom0 = GeomTermBound(p, N, c0_boundMin, c0_boundMax);
+        geom1 = GeomTermBound(p, N, c1_boundMin, c1_boundMax);
+
+        if (geom0 + geom1 == 0)
+            return false;
+
+        if (geom0 == 0)
+        {
+            prob0 = 0;
+            return true;
+        }
+        else if (geom1 == 0)
+        {
+            prob0 = 1;
+            return true;
+        }
+/*
+        Vertex vc0 = LightPathsVertexsBuffer[c0.ID].unpack(false);
+        Vertex vc1 = LightPathsVertexsBuffer[c1.ID].unpack(false);
+        float3 d0 = normalize(vc0.sd.posW - p);
+        float3 d1 = normalize(vc1.sd.posW - p);
+        float cos0 = abs(dot(d0, vc0.sd.N)) * abs(dot(d0, N));
+        float cos1 = abs(dot(d1, vc0.sd.N)) * abs(dot(d1, N));
+        float M0 = getIntensity(RISWeight(v, vc0, path, true, false, true));
+        float M1 = getIntensity(RISWeight(v, vc1, path, true, false, true));
+
+        if (M0 + M1 == 0) {
+            return
+        }
+*/
+        float intensGeom0 = c0_intensity * geom0;
+        float intensGeom1 = c1_intensity * geom1;
+
+        float l2_min0;
+        float l2_min1;
+        l2_min0 = SquaredDistanceToClosestPoint(p, c0_boundMin, c0_boundMax);
+        l2_min1 = SquaredDistanceToClosestPoint(p, c1_boundMin, c1_boundMax);
+
+        float l2_max0 = SquaredDistanceToFarthestPoint(p, c0_boundMin, c0_boundMax);
+        float l2_max1 = SquaredDistanceToFarthestPoint(p, c1_boundMin, c1_boundMax);
+        float w_max0 = l2_min0 == 0 && l2_min1 == 0 ? intensGeom0 / (intensGeom0 + intensGeom1) : normalizedWeights(l2_min0, l2_min1, intensGeom0, intensGeom1);
+        float w_min0 = normalizedWeights(l2_max0, l2_max1, intensGeom0, intensGeom1);
+        prob0 = 0.5 * (w_max0 + w_min0);
+
+        return true;
+    }
+
+    inline bool selectVertex(inout uint nid, inout float r, inout double nprob, inout PathState path,Vertex v)
+    {
+        bool deadBranch = false;
+        while (nid < leafNodeStart)
+        {
+            uint c0_id = nid << 1;
+            uint c1_id = c0_id + 1;
+            float prob0;
+            bool x = firstChildWeight(v, prob0, path, c0_id, c1_id);
+            if (x)
+            {
+                nid = (r < prob0) ? c0_id : c1_id;
+                nprob *= (r < prob0) ? prob0 : (1 - prob0);
+                r = (r < prob0) ? r / prob0 : (r - prob0) / (1 - prob0);
+            }
+            else
+            {
+                deadBranch = true;
+                break;
+            }
+        }
+
+        return deadBranch;
+    }
+
     void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in Vertex cameraPath[6], in bool sampleUpperHemisphere, in bool sampleLowerHemisphere){
         // select several valid vertex from the light path
+        double nprob = 1.0;
+        float r = sampleNext1D(path.sg);
+        uint nid = 1;
+        bool deadBranch = selectVertex(nid, r, nprob, path, v);
 
-        Reservoir r = Reservoir::init();
-        uint LightPathsIndexBufferLength = LightPathsIndexBuffer[0].x - 1;
-        Vertex sample;
-        float3 result_q;
-        //bool validSample = false;
-        //float3 f;
-        for (uint i = 0; i < kCandidateNumber; ++i) {
+        float one_over_prob = (nprob == 0.0) ? 0.0 : 1.0 / float(nprob);
 
-            uint sampleIndex = LightPathsIndexBuffer[min(uint(sampleNext1D(path.sg) * LightPathsIndexBufferLength), LightPathsIndexBufferLength - 1) + 1].x;
-            Vertex candidate = LightPathsVertexsBuffer[sampleIndex].unpack(false);
-            float3 q = RISWeight(v, candidate, path, false);
-            Ray ray = getVisibiliyTestRay(v, candidate);
+        uint sampleIndex = deadBranch ? 0 : nodes[nid].ID;
 
-            float cosTheta = dot(v.sd.N, ray.dir);
-            // Flip the face normal to point in the same hemisphere as the shading normal.
-            float3 faceNormal = sign(dot(v.sd.N, v.sd.faceN)) * v.sd.faceN;
-            float cosThetaFace = dot(faceNormal, ray.dir);
-            if ((!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) || (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta))) {
-                r.M++;
-                continue;
-            }
-            
-            bool visible = vq.traceVisibilityRay(ray);
-            float weight = (visible) ? (q.x + q.y + q.z) * LightPathsIndexBufferLength : 0;
-
-            bool isChange = r.update(sampleIndex, weight, sampleNext1D(path.sg));
-            //isChange = false;
-            /*
-            if (isChange) {
-                sample = candidate;
-                result_q = q;
-            }
-            */
-        }
-
-        sample = LightPathsVertexsBuffer[r.sampleIndex].unpack(false);
-        result_q = RISWeight(v, sample, path, false);
-        if (r.weightSum == 0.f || r.sampleIndex % kMaxSurfaceBounces == 0) {
-            return;
-        }
-        //else return;
-
+        Vertex sample = LightPathsVertexsBuffer[sampleIndex].unpack(false);
+        float3 result_q = RISWeight(v, sample, path, false);
         Ray ray = getVisibiliyTestRay(v, sample);
         bool visible = vq.traceVisibilityRay(ray);
 
         float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
 
-        // Vertex test = CameraPathsVertexsReservoirBuffer[cameraPathOffset(path)].v.unpack(path.getVertexIndex() == 1);
-        // sampleIndex = validSample ? r.sampleIndex : sampleIndex;
-        // cameraPath[5].valid = false;
-        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, r.sampleIndex);
-        float weight_s = result_q.x + result_q.y + result_q.z;
-        r.W = 1 / weight_s * (r.weightSum / r.M);
-        // visible = true;
-        //path.L += (cameraPath[5].valid) ? 1 : 0;
-        path.L += (params.hasFlag(BDPTFlags::s2) && !params.hasFlag(BDPTFlags::spatialReuse) && visible) ? inv_M * v.beta * f * r.W : 0;
-        //path.L += (visible) ? inv_M * v.beta * BDPTMIS(path, r.sampleIndex) * result_q * r.weightSum / (r.M * weight_s) : 0;
-        //path.L += inv_M * v.beta * LightPathsIndexBufferLength * result_q * r.weightSum / (r.M * weight_s);
-        //path.L += inv_M * v.beta * result_q * LightPathsIndexBufferLength* r.weightSum / weight_s;
-        //path.L += validHit ? qs : 0;
-        //path.L += (visible) ? 1.0 / float(kMaxSurfaceBounces) : 0;
+        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, cameraPath, sampleIndex);
+
+        path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? inv_M * f * one_over_prob : 0;
+        //path.L += inv_M * f * one_over_prob;
     }
 
     float BDPTMIS(PathState path, in Vertex cameraPath[6], uint sampleIndex) {

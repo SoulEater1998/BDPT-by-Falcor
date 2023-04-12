@@ -38,6 +38,7 @@
 #include "Rendering/RTXDI/RTXDI.h"
 
 #include "Bitonic64Sort.h"
+#include "VertexTreeBuilder.h"
 #include "BDPTParams.slang"
 
 using namespace Falcor;
@@ -115,8 +116,8 @@ private:
         uint32_t    maxDiffuseBounces = 3;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxSpecularBounces = 3;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
         uint32_t    maxTransmissionBounces = 5;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
-        uint32_t    lightPassWidth = 64;                        ///<
-        uint32_t    lightPassHeight = 64;
+        uint32_t    lightPassWidth = 256;                        ///<
+        uint32_t    lightPassHeight = 256;
         uint32_t    candidateNumber = 8;
 
         // Sampling parameters
@@ -194,6 +195,8 @@ private:
     std::unique_ptr<TracePass>      mpTraceDeltaTransmissionPass;   ///< Delta transmission trace pass (for NRD).
     std::unique_ptr<TracePass>      mpTraceLightPath;           ///< Generate light path (for BDPT).
     std::unique_ptr<TracePass>      mpTraceCameraPath;          ///< Generate camera path (for BDPT).
+    std::unique_ptr<Bitonic64Sort>  mpSortPass;
+    std::unique_ptr<VertexTreeBuilder> mpTreeBuilder;
 
     Texture::SharedPtr              mpSampleOffset;             ///< Output offset into per-sample buffers to where the samples for each pixel are stored (the offset is relative the start of the tile). Only used with non-fixed sample count.
     Buffer::SharedPtr               mpSampleColor;              ///< Compact per-sample color buffer. This is used only if spp > 1.
@@ -201,6 +204,7 @@ private:
     //BDPT
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
+    Buffer::SharedPtr               mpLightPathsVertexsPositionBuffer;
     Buffer::SharedPtr               KeyIndexList;
     //Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
     //Buffer::SharedPtr               mpCameraPathsIndexBuffer;

@@ -40,6 +40,7 @@ import PathState;
 import ColorType;
 import BDPTParams;
 import PathData;
+import Node;
 
 // Shared memory variables.
 // TODO: Can we declare these inside PathGenerator?
@@ -80,6 +81,8 @@ struct PathGenerator
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
 
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
+    RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
+    StructuredBuffer<Node> nodes;
     //StructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 

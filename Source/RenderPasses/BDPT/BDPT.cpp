@@ -549,14 +549,25 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //pRenderContext->uavBarrier(mpMCounter.get());
     // Generate camera path
     //pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
-    FALCOR_ASSERT(mpTraceCameraPath);
-    tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
 
     //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
     //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
 
-    
+    auto kCounterPtr = (uint*)mpLightPathsIndexBuffer->getUAVCounter()->map(Buffer::MapType::Read);
+    uint counter = *kCounterPtr;
+    mpSortPass->setListCount(counter);
+    mpSortPass->sort(pRenderContext);
 
+    mpTreeBuilder->update(counter);
+    mpTreeBuilder->build(pRenderContext);
+    //mpSortPass->sortTest(pRenderContext, renderData.getTexture(kOutputColor), mParams.frameDim);
+
+    pRenderContext->uavBarrier(mpTreeBuilder->getTree().get());
+    FALCOR_ASSERT(mpTraceCameraPath);
+    auto var = mpPathTracerBlock->getRootVar();
+    var["leafNodeStart"] = mpTreeBuilder->getLeafNodeStartIndex();
+    tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
+    
     pRenderContext->uavBarrier(mpOutput.get());
     pRenderContext->copyResource(renderData.getTexture(kOutputColor).get(), mpOutput.get());
     //spatiotemporalReuse(pRenderContext, renderData);
@@ -564,7 +575,7 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //resolvePass(pRenderContext, renderData);
 
     //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
-    pRenderContext->uavBarrier(mpOutput.get());
+    //pRenderContext->uavBarrier(mpOutput.get());
     endFrame(pRenderContext, renderData);
 }
 
@@ -1296,9 +1307,13 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
     if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount);
+    if (!mpLightPathsVertexsPositionBuffer) mpLightPathsVertexsPositionBuffer = Buffer::createStructured(var["LightPathsVertexsPositionBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+
+    if (!mpSortPass) mpSortPass = std::make_unique<Bitonic64Sort>(mpLightPathsIndexBuffer, 0);
+    if (!mpTreeBuilder) mpTreeBuilder = std::make_unique<VertexTreeBuilder>(mpLightPathsIndexBuffer, mpLightPathsVertexsPositionBuffer, lightVertexElementCount);
     //if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
     //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
@@ -1349,6 +1364,8 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
         //var["sampleColor"] = mpSampleColor;
         var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
         var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
+        var["LightPathsVertexsPositionBuffer"] = mpLightPathsVertexsPositionBuffer;
+        var["nodes"] = mpTreeBuilder->getTree();
         //var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
         //var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
         //var["MCounter"] = mpMCounter;

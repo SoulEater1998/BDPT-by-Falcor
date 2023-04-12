@@ -72,6 +72,7 @@ void Bitonic64Sort::sort(RenderContext* pRenderContext) {
 }
 
 void Bitonic64Sort::sortTest(RenderContext* pRenderContext, Texture::SharedPtr& _output, uint2 frameDim) {
+    FALCOR_ASSERT(listCount != 0);
     SortTestCS["gOutput"] = _output;
     SortTestCS["CSConstants"]["totalNum"] = listCount;
     SortTestCS->execute(pRenderContext, uint3(frameDim, 1));
