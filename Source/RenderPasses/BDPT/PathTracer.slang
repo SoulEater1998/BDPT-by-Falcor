@@ -1415,8 +1415,8 @@ struct PathTracer
         
         
         // s == 0
-        
-        bool computeEmissive = (isPrimaryHit || kUseEmissiveLights);
+
+        bool computeEmissive = kUseEmissiveLights;
         TriangleHit triangleHit = path.hit.getTriangleHit();
         TriangleLightHit hit;
         hit.triangleIndex = gScene.lightCollection.getTriangleIndex(triangleHit.instanceID, triangleHit.primitiveIndex);
