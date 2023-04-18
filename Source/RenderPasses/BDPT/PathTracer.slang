@@ -1369,8 +1369,8 @@ struct PathTracer
         float3 ray_dir;
         float dirPdf;
         validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
-        
 
+        ray_dir = normalize(lightVertex.sd.posW - pvertex.pos);
        
         float cosTheta = dot(pvertex.normal, ray_dir);
         // Flip the face normal to point in the same hemisphere as the shading normal.
