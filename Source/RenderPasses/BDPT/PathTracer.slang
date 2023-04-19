@@ -1118,25 +1118,6 @@ struct PathTracer
         // Reject false hits in nested dielectrics.
         if (!handleNestedDielectrics(sd, path)) return;
 
-        // uint bounce = path.getVertexIndex();
-        //Vertex vertex = Vertex::init();
-        //Vertex *vertex = &LightPathsVertexsBuffer[lightPathOffset(path)]; // = &tempVertexBuffer[bounce];
-
-        if (isCurveHit)
-        {
-            // For curves, we set the new origin at the sphere center.
-            path.origin = sd.posW - sd.N * sd.curveRadius;
-        }
-        else if (isCurvePolyTubeHit)
-        {
-            // For curves tessellated into poly-tubes, we offset the new origin away from the curve center.
-            path.origin = sd.posW + sd.N * sd.curveRadius * 0.1f;
-        }
-        else
-        {
-            path.origin = sd.computeNewRayOrigin();
-        }
-
         // TODO: move this to TraceLightPath
         uint offset = lightPathOffset(path);
         Vertex prev = LightPathsVertexsBuffer[offset - 1].unpack(false);
@@ -1176,6 +1157,21 @@ struct PathTracer
         uint mortonCode = GenMortonCode(vertex.sd.posW);
         LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
         LightPathsVertexsPositionBuffer[offset] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta) : 0);
+
+        if (isCurveHit)
+        {
+            // For curves, we set the new origin at the sphere center.
+            path.origin = sd.posW - sd.N * sd.curveRadius;
+        }
+        else if (isCurvePolyTubeHit)
+        {
+            // For curves tessellated into poly-tubes, we offset the new origin away from the curve center.
+            path.origin = sd.posW + sd.N * sd.curveRadius * 0.1f;
+        }
+        else
+        {
+            path.origin = sd.computeNewRayOrigin();
+        }
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         // t == 1
