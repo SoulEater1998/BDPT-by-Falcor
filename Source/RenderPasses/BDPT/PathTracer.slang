@@ -1161,7 +1161,7 @@ struct PathTracer
         vInfo.de = dl;
         LightPathsVertexsBuffer[offset] = vInfo;
         
-
+        
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
         uint mortonCode = GenMortonCode(vertex.sd.posW);
         LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
