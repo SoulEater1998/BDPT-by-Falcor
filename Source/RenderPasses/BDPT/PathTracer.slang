@@ -266,7 +266,7 @@ struct PathTracer
         \param[in] line Pixel per line.
         \param[out] path Path state for the primary hit.
     */
-    void generateLightPath(const uint pathID, out PathState path)
+    void generateLightPath(const uint pathID, out PathState path, out float dl)
     {
         // intial path state
         path = {};
@@ -298,6 +298,7 @@ struct PathTracer
         path.thp = lv.beta;
         path.pdf = dirPdf;
 
+        dl = 1.0f / lv.pdfFwd;
         
     }
 
@@ -1086,7 +1087,7 @@ struct PathTracer
         return quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
     }
 
-    void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq) {
+    void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout float dl) {
         const bool isPrimaryHit = false;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
@@ -1151,8 +1152,16 @@ struct PathTracer
         sdRev.V = bs.wo;
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
+        bool hasDelta = ((uint)LobeType::Delta & lobes) != 0;
+        float N = hasDelta ? 0 : 1.0;
+        pdfRev = vertex.ConvertDensity(pdfRev, prev);
 
-        LightPathsVertexsBuffer[offset] = VertexInfo::create(path, vertex);
+        VertexInfo vInfo = VertexInfo::create(path, vertex);
+        dl = (N + pdfRev * dl) / remap0(vertex.pdfFwd);
+        vInfo.de = dl;
+        LightPathsVertexsBuffer[offset] = vInfo;
+        
+
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
         uint mortonCode = GenMortonCode(vertex.sd.posW);
         LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
@@ -1174,63 +1183,13 @@ struct PathTracer
         }
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
-        // t == 1
-/*
-        float3 cameraN = normalize(gScene.camera.data.cameraW);
-        float3 cameraU = normalize(gScene.camera.data.cameraU);
-        float3 cameraV = normalize(gScene.camera.data.cameraV);
-        float3 cameraPos = gScene.camera.getPosition();
-
-        float3 toCamera = cameraPos - sd.posW;
-        float3 ray_dir = normalize(toCamera);
-
-        PathVertex pvertex = PathVertex(1, sd.posW, sd.N, sd.faceN);
-        float3 origin = pvertex.getRayOrigin(ray_dir);
-        float3 toCameraRay = cameraPos - origin;
-        float distSqr = max(dot(toCameraRay, toCameraRay), kMinLightDistSqr);
-        float distance = sqrt(distSqr);
-        float3 dir = toCameraRay / distance;
-
-        float3 Lr = vertex.beta * bsdf.eval(sd, normalize(toCamera), path.sg) * dot(cameraN, -ray_dir) / distSqr;
-
-        bool validSample = true;
-
-        bool sampleUpperHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
-        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
-        bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
-        float cosTheta = dot(pvertex.normal, ray_dir);
-        // Flip the face normal to point in the same hemisphere as the shading normal.
-        float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
-        float cosThetaFace = dot(faceNormal, ray_dir);
-        if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) validSample = false;
-        if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) validSample = false;
-
-        if (params.hasFlag(BDPTFlags::t1) && any(Lr > 0) && validSample) {
-            
-            Ray ray = Ray(origin, dir, 0, distance);
-
-            logTraceRay(PixelStatsRayType::Visibility);
-            bool visible = vq.traceVisibilityRay(ray);
-
-            float d1 = dot(toCamera, cameraU) / dot(cameraU, cameraU);
-            float d2 = dot(toCamera, cameraV) / dot(cameraV, cameraV);
-            float d3 = dot(toCamera, cameraN) / dot(cameraN, cameraN);
-            float2 ndc = float2(d1 / d3, -d2 / d3);
-            float2 pixelCenter = ndc * float2(0.5, 0.5) + float2(0.5, 0.5);
-            uint2 dim = params.frameDim;
-            uint2 id = uint2(round(pixelCenter * dim));
-
-            if (visible) outputColor[id].rgb += Lr * BDPTMIS_t0(path, offset);
-        }
-*/
-
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
 
         if (((lobes & (uint)LobeType::DeltaReflection) != 0) || ((lobes & (uint)LobeType::DeltaTransmission) != 0)) {
             vertex.delta = true;
             LightPathsVertexsBuffer[offset].setDelta(true);
             pdfRev = 0;
-            path.pdf = 0;
+            //path.pdf = 0;
         }
 
         LightPathsVertexsBuffer[offset - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);

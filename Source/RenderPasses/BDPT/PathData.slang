@@ -132,6 +132,7 @@ struct VertexInfo
     float pdfRev = 0;
     float3 beta;
     uint flagAndType = 0;
+    float de = 0;
 
     static VertexInfo create(PathState path, Vertex v) {
         VertexInfo vinfo = {};

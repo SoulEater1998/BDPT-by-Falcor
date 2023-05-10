@@ -121,8 +121,8 @@ struct Scheduler
 
         gPathTracer.setupPathLogging(path);
 
-        VisibilityQuery vq;
-        gPathTracer.lightPathHandleHit(path, vq);
+        //VisibilityQuery vq;
+        //gPathTracer.lightPathHandleHit(path, vq);
 
         payload = PathPayload::pack(path);
     }
@@ -131,7 +131,7 @@ struct Scheduler
         This replaces `PathTracer::nextHit` but without support for volume sampling.
         \param[in,out] path Path state.
     */
-    void nextHit(inout PathState path)
+    void nextHit(inout PathState path, inout float dl)
     {
         // Advance to next path vertex.
         path.incrementVertexIndex();
@@ -145,6 +145,10 @@ struct Scheduler
         TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, kRayTypeScatter /* hitIdx */, rayTypeCount, kMissScatter /* missIdx */, ray.toRayDesc(), payload);
 
         path = PathPayload::unpack(payload);
+        if (path.isActive()) {
+            VisibilityQuery vq;
+            gPathTracer.lightPathHandleHit(path, vq, dl);
+        }
     }
 
     /** Traces a path and write result to output.
@@ -153,15 +157,16 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
+        float dl = 0;
         //sample initial ray for light subpath
-        gPathTracer.generateLightPath(pathID, path);
+        gPathTracer.generateLightPath(pathID, path, dl);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.
         
         while (path.isActive())
         {
-            nextHit(path);
+            nextHit(path, dl);
         }
         
         //gPathTracer.pushInBuffer(path, dim.x);
