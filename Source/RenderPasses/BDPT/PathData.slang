@@ -48,6 +48,23 @@ struct Vertex
         return pdf * invDist2;
     };
 
+    float ConvertDensity(PathState path) {
+        float3 w = sd.posW - path.origin;
+        if (dot(w, w) == 0) return 0.f;
+        float invDist2 = 1 / dot(w, w);
+        float pdf = path.pdf;
+        pdf *= abs(dot(sd.N, w * sqrt(invDist2)));
+        return pdf * invDist2;
+    }
+
+    float ConvertRevDensity(PathState path, float pdfRev) {
+        float3 w = path.origin - sd.posW;
+        if (dot(w, w) == 0) return 0.f;
+        float invDist2 = 1 / dot(w, w);
+        pdfRev *= abs(dot(path.normal, w * sqrt(invDist2)));
+        return pdfRev * invDist2;
+    }
+
     static Vertex createCamera(float3 posW, float3 N) {
         Vertex cv = {};
         cv.sd.posW = posW;

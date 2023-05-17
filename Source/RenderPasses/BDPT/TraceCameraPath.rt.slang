@@ -139,7 +139,7 @@ struct Scheduler
         This replaces `PathTracer::nextHit` but without support for volume sampling.
         \param[in,out] path Path state.
     */
-    void nextHit(inout PathState path, inout Vertex cameraPath[6])
+    void nextHit(inout PathState path, inout float de)
     {
         // Advance to next path vertex.
         path.incrementVertexIndex();
@@ -155,7 +155,7 @@ struct Scheduler
         path = PathPayload::unpack(payload);
         if (path.isActive()) {
             VisibilityQuery vq;
-            gPathTracer.CameraPathHandleHit(path, vq, cameraPath);
+            gPathTracer.CameraPathHandleHit(path, vq, de);
         }
         
     }
@@ -166,7 +166,8 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
-        Vertex cameraPath[6];
+        // Vertex cameraPath[6];
+        float de = 0;
         gPathTracer.generatePath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
@@ -180,7 +181,7 @@ struct Scheduler
 #else
             VisibilityQuery vq;
             // path.setVertexIndex(0);
-            gPathTracer.CameraPathHandleHit(path, vq, cameraPath);
+            gPathTracer.CameraPathHandleHit(path, vq, de);
             //gPathTracer.handleHit(path, vq);
 #endif
         }
@@ -195,7 +196,7 @@ struct Scheduler
         
         while (path.isActive())
         {
-            nextHit(path, cameraPath);
+            nextHit(path, de);
         }
         
         #if !defined(DELTA_REFLECTION_PASS) && !defined(DELTA_TRANSMISSION_PASS)
