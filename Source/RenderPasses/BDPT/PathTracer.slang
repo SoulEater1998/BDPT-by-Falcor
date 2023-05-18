@@ -1161,13 +1161,18 @@ struct PathTracer
         vInfo.de = dl;
         LightPathsVertexsBuffer[offset] = vInfo;
 
+        float3 albedo =   bsdfProperties.diffuseReflectionAlbedo 
+                        + bsdfProperties.diffuseTransmissionAlbedo 
+                        + bsdfProperties.specularReflectionAlbedo 
+                        + bsdfProperties.specularTransmissionAlbedo;
+
         if (!hasDelta) {
             uint vertexID = LightPathsIndexBuffer.IncrementCounter();
             uint mortonCode = GenMortonCode(vertex.sd.posW);
             LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
         }
-        
-        LightPathsVertexsPositionBuffer[offset] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta) : 0);
+
+        LightPathsVertexsPositionBuffer[offset] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta * albedo) : 0);
 
         if (isCurveHit)
         {
