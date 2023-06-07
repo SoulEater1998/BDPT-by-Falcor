@@ -20,18 +20,7 @@ void main(uint3 dispatchThreadId: SV_DispatchThreadID)
     }
     else {
         uint2 KeyIndexPair = keyIndexList.Load2(8 * offset);
-        // gOutput[pixel] = float4(0, 1, 0, 0);
-        // gOutput[pixel] = float4(float(KeyIndexPair.y) / float(0x7fffffff));
-        switch (KeyIndexPair.y & 0x3) {
-        case 0:
-            gOutput[pixel] = float4(1, 1, 1, 0);
-            return;
-        case 1:
-            gOutput[pixel] = float4(0, 1, 0, 0);
-            return;
-        default:
-            gOutput[pixel] = float4(0, 0, 0, 0);
-            return;
-        }
+        //gOutput[pixel] = float4(0, 1, 0, 0);
+        gOutput[pixel] = float4(float(KeyIndexPair.y)/0x4fffffff);
     }
 }

@@ -79,7 +79,7 @@ struct PathGenerator
 
     RWStructuredBuffer<ColorType> sampleColor;          ///< Output per-sample color if kSamplesPerPixel != 1.
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
-    StructuredBuffer<VertexInfo> finalLightPathsVertexsBuffer;
+
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
     StructuredBuffer<Node> nodes;

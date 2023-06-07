@@ -46,13 +46,6 @@ StructuredBuffer<VertexInfo>    LightPathsVertexsBuffer;
 //StructuredBuffer<CameraVertex>  DstCameraPathsVertexsReservoirBuffer;
 StructuredBuffer<uint2>         LightPathsIndexBuffer;
 StructuredBuffer<float4>        LightPathsVertexsPositionBuffer;
-
-StructuredBuffer<VertexInfo>    PrevLightPathsVertexsBuffer;
-StructuredBuffer<uint2>         PrevLightPathsIndexBuffer;
-StructuredBuffer<float4>        PrevLightPathsVertexsPositionBuffer;
-
-StructuredBuffer<uint2>         SortWorkspace;
-StructuredBuffer<uint2>         KeyIndexList;
 //StructuredBuffer<float4>        CameraPathsIndexBuffer;
 //StructuredBuffer<uint>          MCounter;
 //StructuredBuffer<uint>          Counter;

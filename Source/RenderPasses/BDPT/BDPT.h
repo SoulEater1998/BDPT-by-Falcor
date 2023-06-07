@@ -205,12 +205,6 @@ private:
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
     Buffer::SharedPtr               mpLightPathsVertexsPositionBuffer;
-
-    Buffer::SharedPtr               mpPrevLightPathVertexBuffer;    ///<
-    Buffer::SharedPtr               mpPrevLightPathsIndexBuffer;
-    Buffer::SharedPtr               mpPrevLightPathsVertexsPositionBuffer;
-
-    Buffer::SharedPtr               mpSortWorkspace;
     Buffer::SharedPtr               KeyIndexList;
     //Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
     //Buffer::SharedPtr               mpCameraPathsIndexBuffer;

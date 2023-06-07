@@ -89,9 +89,6 @@ struct PathTracer
     float3 corner;
     uint leafNodeStart;
     uint counter;
-    uint prevCounter;
-    uint accumulativeCounter;
-    float sceneRadius;
     float3 dimension;
     //RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
@@ -114,7 +111,6 @@ struct PathTracer
     RWTexture2D<float4> outputColor;                      ///< Output color buffer if kSamplesPerPixel == 1.
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
-    StructuredBuffer<VertexInfo> finalLightPathsVertexsBuffer;
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
     //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
@@ -307,7 +303,7 @@ struct PathTracer
         path.thp = lv.beta;
         path.pdf = dirPdf;
 
-        uint vertexID = LightPathsIndexBuffer.IncrementCounter() + prevCounter;
+        uint vertexID = LightPathsIndexBuffer.IncrementCounter();
         uint mortonCode = GenMortonCode(path.origin);
         LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
         LightPathsVertexsBuffer[vertexID] = vInfo;
@@ -1096,7 +1092,7 @@ struct PathTracer
         float3 normPos = (pos - corner) / dimension;
         uint3 quantPos = min(max(0, uint3(normPos * quantLevels)), quantLevels - 1);
         quantPos = BitExpansion(quantPos);
-        return ((quantPos.x * 4 + quantPos.y * 2 + quantPos.z) << 2) + 1;
+        return quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
     }
 
     void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout float dl) {
@@ -1179,7 +1175,7 @@ struct PathTracer
                         + bsdfProperties.specularTransmissionAlbedo;
 
         if (!hasDelta) {
-            uint vertexID = LightPathsIndexBuffer.IncrementCounter() + prevCounter;
+            uint vertexID = LightPathsIndexBuffer.IncrementCounter();
             uint mortonCode = GenMortonCode(vertex.sd.posW);
             LightPathsVertexsBuffer[vertexID] = vInfo;
             LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
@@ -1636,20 +1632,20 @@ struct PathTracer
         float one_over_prob = (nprob == 0.0) ? 0.0 : 1.0 / float(nprob);
 
         if (deadBranch) return;
-        /*
+        
         if (params.hasFlag(BDPTFlags::t1)) {
             
-            nid = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+            nid = min(uint(counter * sampleNext1D(path.sg)), counter - 1) + leafNodeStart;
             one_over_prob = counter;
         }
-        */
+        
         Node sampleNode = nodes[nid];
         uint sampleIndex = sampleNode.ID;
 
-        VertexInfo sampleInfo = finalLightPathsVertexsBuffer[sampleIndex];
+        VertexInfo sampleInfo = LightPathsVertexsBuffer[sampleIndex];
 
         // one_over_prob *= sampleNode.betaSum / getIntensity(sampleInfo.beta);
-        one_over_prob /= sampleNode.pdf;
+        //one_over_prob /= sampleNode.pdf;
 
         float3 f;
         Ray ray;
@@ -1694,7 +1690,7 @@ struct PathTracer
 
         bool visible =vq.traceVisibilityRay(ray);
 
-        float inv_M = 1.0 / float(accumulativeCounter);//float(kLightPassHeight * kLightPassWidth);
+        float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
 
         path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? inv_M * v.beta * f * one_over_prob : 0;
         //path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? v.beta * f : 0;
