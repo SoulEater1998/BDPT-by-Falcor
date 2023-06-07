@@ -1,8 +1,8 @@
 //import PathTracer;
 //import PathData;
 StructuredBuffer<uint2> srcBuffer;
-//RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
-RWByteAddressBuffer keyIndexList;
+RWStructuredBuffer<uint2> dstBuffer;
+
 #define DEFAULT_BLOCK_SIZE 1024
 cbuffer CSConstants
 {
@@ -36,6 +36,8 @@ float IntegerRadicalInverse(int Base, int i)
 [numthreads(DEFAULT_BLOCK_SIZE, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
+    
+    
     // float3 corner = Bound[0].xyz;
     // float3 dimension = Bound[1].xyz;
 

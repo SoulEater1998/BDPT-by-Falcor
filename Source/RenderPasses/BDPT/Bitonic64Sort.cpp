@@ -18,9 +18,10 @@ Bitonic64Sort::Bitonic64Sort(Buffer::SharedPtr& _KeyIndexList, uint _listCount) 
     Bitonic64OuterSortCS = ComputePass::create(kBitonic64OuterSortFilename, "main");
     Bitonic64InnerSortCS = ComputePass::create(kBitonic64InnerSortFilename, "main");
     SortTestCS = ComputePass::create(kSortTestFilename, "main");
-    MapCS = ComputePass::create(kMapPassFilename, "main");
+    //MapCS = ComputePass::create(kMapPassFilename, "main");
 
     DispatchArgs = Buffer::createStructured(sizeof(uint3), 22 * 23 / 2, ResourceBindFlags::UnorderedAccess | ResourceBindFlags::IndirectArg);
+
     //Sort
     BitonicArgsCS["g_IndirectArgsBuffer"] = DispatchArgs;
     Bitonic64PreSortCS["g_SortBuffer"] = KeyIndexList;
@@ -42,7 +43,7 @@ void Bitonic64Sort::sort(RenderContext* pRenderContext) {
     BitonicArgsCS["Constants"]["constListCount"] = listCount;
     
     BitonicArgsCS->execute(pRenderContext, uint3(22, 1, 1));
-
+    
     Bitonic64PreSortCS["Constants"]["constListCount"] = listCount;
 
     pRenderContext->uavBarrier(KeyIndexList.get());
@@ -52,7 +53,7 @@ void Bitonic64Sort::sort(RenderContext* pRenderContext) {
 
     Bitonic64OuterSortCS["Constants"]["constListCount"] = listCount;
     Bitonic64InnerSortCS["Constants"]["constListCount"] = listCount;
-
+    
     for (uint k = 4096; k <= AlignedMaxNumElements; k *= 2) {
         for (uint j = k / 2; j >= 2048; j /= 2) {
             Bitonic64OuterSortCS["Constants"]["k"] = k;

@@ -1,7 +1,7 @@
 
-__exported import LoadShadingData;
-__exported import Utils.Sampling.SampleGenerator;
-__exported import Scene.HitInfo;
+import LoadShadingData;
+import Utils.Sampling.SampleGenerator;
+import Scene.HitInfo;
 import PathState;
 
 enum class VertexType
@@ -47,6 +47,14 @@ struct Vertex
         /*if(next.type == VertexType::SurfaceOrMedium)*/ pdf *= abs(dot(next.sd.N, w * sqrt(invDist2)));
         return pdf * invDist2;
     };
+
+    float ConvertDensity(float pdf, const float3 nextPos, const float3 nextNormal) {
+        float3 w = nextPos - sd.posW;
+        if (dot(w, w) == 0) return 0.f;
+        float invDist2 = 1 / dot(w, w);
+        pdf *= abs(dot(nextNormal, w * sqrt(invDist2)));
+        return pdf * invDist2;
+    }
 
     float ConvertDensity(PathState path) {
         float3 w = sd.posW - path.origin;
@@ -221,6 +229,11 @@ struct VertexInfo
         return (flagAndType & uint(VertexFlag::valid)) != 0;
     }
 
+    bool isLight() {
+        uint type = flagAndType & uint(VertexFlag::typeMask);
+        return type == uint(VertexType::Light);
+    }
+
     bool isVisible() {
         return (flagAndType & uint(VertexFlag::visible)) != 0;
     }
@@ -288,6 +301,28 @@ inline float AbsMinDistAlong(float3 p, float3 dir, float3 boundMin, float3 bound
         return 0.f;
     else
         return min(min(min(abs(a), abs(b)), min(abs(c), abs(d))), min(min(abs(e), abs(f)), min(abs(g), abs(h))));
+}
+
+inline float AbsMinDistAlong(float3 p, float3 dir, float3 boundMin, float3 boundMax, out bool hasPositive)
+{
+    hasPositive = false;
+    bool hasNegative = false;
+    float a = dot(dir, float3(boundMin.x, boundMin.y, boundMin.z) - p);
+    float b = dot(dir, float3(boundMin.x, boundMin.y, boundMax.z) - p);
+    float c = dot(dir, float3(boundMin.x, boundMax.y, boundMin.z) - p);
+    float d = dot(dir, float3(boundMin.x, boundMax.y, boundMax.z) - p);
+    float e = dot(dir, float3(boundMax.x, boundMin.y, boundMin.z) - p);
+    float f = dot(dir, float3(boundMax.x, boundMin.y, boundMax.z) - p);
+    float g = dot(dir, float3(boundMax.x, boundMax.y, boundMin.z) - p);
+    float h = dot(dir, float3(boundMax.x, boundMax.y, boundMax.z) - p);
+    hasPositive = a > 0 || b > 0 || c > 0 || d > 0 || e > 0 || f > 0 || g > 0 || h > 0;
+    hasNegative = a < 0 || b < 0 || c < 0 || d < 0 || e < 0 || f < 0 || g < 0 || h < 0;
+    if (hasPositive && hasNegative) {
+        return 0.f;
+    }
+    else {
+        return min(min(min(abs(a), abs(b)), min(abs(c), abs(d))), min(min(abs(e), abs(f)), min(abs(g), abs(h))));
+    }     
 }
 
 inline float GeomTermBound(float3 p, float3 N, float3 boundMin, float3 boundMax)

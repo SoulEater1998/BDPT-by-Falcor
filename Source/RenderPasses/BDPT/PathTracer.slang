@@ -88,6 +88,10 @@ struct PathTracer
     PathTracerParams params; ///< Runtime parameters.
     float3 corner;
     uint leafNodeStart;
+    uint counter;
+    uint prevCounter;
+    uint accumulativeCounter;
+    float sceneRadius;
     float3 dimension;
     //RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
@@ -110,6 +114,7 @@ struct PathTracer
     RWTexture2D<float4> outputColor;                      ///< Output color buffer if kSamplesPerPixel == 1.
 
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
+    StructuredBuffer<VertexInfo> finalLightPathsVertexsBuffer;
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
     //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
@@ -248,7 +253,7 @@ struct PathTracer
 
         // Create sample generator.
         const uint maxSpp = kSamplesPerPixel > 0 ? kSamplesPerPixel : kMaxSamplesPerPixel;
-        path.sg = SampleGenerator(pixel, params.seed * maxSpp + path.getSampleIdx());
+        path.sg = SampleGenerator(pixel, params.frameCount * 2 + 1);
 
         // Load the primary hit info from the V-buffer.
         const HitInfo hit = HitInfo(vbuffer[pixel]);
@@ -276,17 +281,21 @@ struct PathTracer
         Vertex lv;
         const uint2 pixel = path.getPixel();
         const uint maxSpp = kSamplesPerPixel > 0 ? kSamplesPerPixel : kMaxSamplesPerPixel;
-        path.sg = SampleGenerator(pixel, params.seed * maxSpp + path.getSampleIdx());
+        path.sg = SampleGenerator(pixel, params.frameCount * 2);
 
         //Sample a point on Lights
         float3 ray_dir = float3(0,0,0);
         float dirPdf;
         if (!generateLightSample_BDPT(path.sg, lv, ray_dir, dirPdf)) return;
         path.setVertexIndex(0);
-        uint offset = lightPathOffset(path);
+        //uint offset = lightPathOffset(path);
         // ShadingData sd = {};
         lv.type = VertexType::Light;
-        LightPathsVertexsBuffer[offset] = VertexInfo::createLight(lv);
+        VertexInfo vInfo = VertexInfo::createLight(lv);
+        vInfo.de = 1.0f / lv.pdfFwd;
+        vInfo.beta *= dirPdf;
+        dl = vInfo.de;
+        
         //LightPathsIndexBuffer[LightPathsIndexBuffer.IncrementCounter()] = offset;
         //tempVertexBuffer[0] = lv;
         //LightPathsVertexsBuffer[(pixel.y * line_number + pixel.x) * kMaxSurfaceBounces] = lv;
@@ -298,8 +307,11 @@ struct PathTracer
         path.thp = lv.beta;
         path.pdf = dirPdf;
 
-        dl = 1.0f / lv.pdfFwd;
-        
+        uint vertexID = LightPathsIndexBuffer.IncrementCounter() + prevCounter;
+        uint mortonCode = GenMortonCode(path.origin);
+        LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
+        LightPathsVertexsBuffer[vertexID] = vInfo;
+        LightPathsVertexsPositionBuffer[vertexID] = float4(path.origin, getIntensity(vInfo.beta));
     }
 
     /** Set up path for logging and debugging.
@@ -560,7 +572,7 @@ struct PathTracer
         if(posPdf <= 0.f || dirPdf <= 0.f || all(Le) <= 0.f) return false;
 
         // Setup returned sample.
-        lv.beta = Le * abs(dot(normal, w)) / (triangleSelectionPdf * posPdf * dirPdf); //the "beta" of the subpath
+        lv.beta = Le /* * abs(dot(normal, w))*/ / (triangleSelectionPdf * posPdf * dirPdf); //the "beta" of the subpath
         lv.pdfFwd = triangleSelectionPdf * posPdf;
         lv.type = VertexType::Light;
         lv.sd.N = normal;
@@ -627,7 +639,7 @@ struct PathTracer
         lv.sd.posW = lightSample.posW;
         lv.sd.N = lightSample.normalW;
         ray_dir = lightSample.dir;
-        lv.beta = lightSample.Li * dot(lv.sd.N, ray_dir) / (lightCountPdf * lightSample.pdf * lightSample.distance);
+        lv.beta = lightSample.Li /* * dot(lv.sd.N, ray_dir)*/ / (lightCountPdf * lightSample.pdf * lightSample.distance);
         lv.pdfFwd = lightCountPdf * lightSample.pdf;
         lv.type = VertexType::Light;
         dirPdf = lightSample.distance;
@@ -1084,7 +1096,7 @@ struct PathTracer
         float3 normPos = (pos - corner) / dimension;
         uint3 quantPos = min(max(0, uint3(normPos * quantLevels)), quantLevels - 1);
         quantPos = BitExpansion(quantPos);
-        return quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
+        return ((quantPos.x * 4 + quantPos.y * 2 + quantPos.z) << 2) + 1;
     }
 
     void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout float dl) {
@@ -1120,11 +1132,11 @@ struct PathTracer
         if (!handleNestedDielectrics(sd, path)) return;
 
         // TODO: move this to TraceLightPath
-        uint offset = lightPathOffset(path);
-        Vertex prev = LightPathsVertexsBuffer[offset - 1].unpack(false);
+        //uint offset = lightPathOffset(path);
+        //Vertex prev = LightPathsVertexsBuffer[offset - 1].unpack(false);
 
         Vertex vertex = Vertex::create(sd, path.thp, path.pdf, 0, VertexType::SurfaceOrMedium);
-        vertex.pdfFwd = prev.ConvertDensity(path.pdf, vertex);
+        vertex.pdfFwd = vertex.ConvertDensity(path);
 
         const IBSDF bsdf = gScene.materials.getBSDF(sd, lod);
         BSDFProperties bsdfProperties = bsdf.getProperties(sd);
@@ -1153,13 +1165,13 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
         bool hasDelta = ((uint)LobeType::Delta & lobes) != 0;
-        float N = hasDelta ? 0 : 1.0;
-        pdfRev = vertex.ConvertDensity(pdfRev, prev);
+        float N = hasDelta ? 0 : 2.0;
+        pdfRev = vertex.ConvertRevDensity(path, pdfRev);
 
         VertexInfo vInfo = VertexInfo::create(path, vertex);
         dl = (N + pdfRev * dl) / remap0(vertex.pdfFwd);
         vInfo.de = dl;
-        LightPathsVertexsBuffer[offset] = vInfo;
+        //LightPathsVertexsBuffer[offset] = vInfo;
 
         float3 albedo =   bsdfProperties.diffuseReflectionAlbedo 
                         + bsdfProperties.diffuseTransmissionAlbedo 
@@ -1167,12 +1179,12 @@ struct PathTracer
                         + bsdfProperties.specularTransmissionAlbedo;
 
         if (!hasDelta) {
-            uint vertexID = LightPathsIndexBuffer.IncrementCounter();
+            uint vertexID = LightPathsIndexBuffer.IncrementCounter() + prevCounter;
             uint mortonCode = GenMortonCode(vertex.sd.posW);
-            LightPathsIndexBuffer[vertexID] = uint2(offset, mortonCode);
+            LightPathsVertexsBuffer[vertexID] = vInfo;
+            LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
+            LightPathsVertexsPositionBuffer[vertexID] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta) : 0);
         }
-
-        LightPathsVertexsPositionBuffer[offset] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta * albedo) : 0);
 
         if (isCurveHit)
         {
@@ -1191,15 +1203,15 @@ struct PathTracer
         //InterlockedAdd(MCounter[path.getVertexIndex()], 1);
 
         if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
-
+/*
         if (((lobes & (uint)LobeType::DeltaReflection) != 0) || ((lobes & (uint)LobeType::DeltaTransmission) != 0)) {
             vertex.delta = true;
             LightPathsVertexsBuffer[offset].setDelta(true);
             pdfRev = 0;
             //path.pdf = 0;
         }
-
-        LightPathsVertexsBuffer[offset - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
+*/
+        //LightPathsVertexsBuffer[offset - 1].pdfRev = vertex.ConvertDensity(pdfRev, prev);
         
 
         const bool isLastVertex = hasFinishedSurfaceBounces(path) || path.getVertexIndex() + 1 >= kMaxSurfaceBounces;
@@ -1280,7 +1292,7 @@ struct PathTracer
 
         bool hasDelta = (lobes & (uint)LobeType::Delta) != 0;
         vertex.delta = hasDelta;
-        float N = hasDelta ? 0.f : 1.f;
+        float N = (isPrimaryHit ? 2.f : 1.f);
 
         de = (N + de * vertex.ConvertRevDensity(path, pdfRev)) / remap0(vertex.pdfFwd);
 
@@ -1288,65 +1300,58 @@ struct PathTracer
         if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
         bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
 
-        //s > 1
-        ConnectBDPT(path, vertex, vq, de);
-        
-        //s == 1
-        //TODO:trans
-        bool validSample = false;
+        //s >= 1
+        ConnectBDPT(path, vertex, vq, de, sampleUpperHemisphere, sampleLowerHemisphere);
 
-        // Sample a point on a light and connect it to the camera subpath
-        PathVertex pvertex = PathVertex(path.getVertexIndex(), sd.posW, sd.N, sd.faceN);
-        
-        Vertex lightVertex = {};
-        float3 ray_dir;
-        float dirPdf;
-        validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
+        // s == 1
+        // TODO:trans
+        if (isPrimaryHit) {
+            bool validSample = false;
 
-        ray_dir = normalize(lightVertex.sd.posW - pvertex.pos);
-       
-        float cosTheta = dot(pvertex.normal, ray_dir);
-        // Flip the face normal to point in the same hemisphere as the shading normal.
-        float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
-        float cosThetaFace = dot(faceNormal, ray_dir);
-        if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) validSample = false;
-        if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) validSample = false;
-/*
-        LightSample ls = {};
-        validSample = generateLightSample(pvertex, sampleUpperHemisphere, sampleLowerHemisphere, path.sg, ls);
-*/
+            // Sample a point on a light and connect it to the camera subpath
+            PathVertex pvertex = PathVertex(path.getVertexIndex(), sd.posW, sd.N, sd.faceN);
 
-        if (validSample)
-        {
-            lightVertex.beta = lightVertex.beta * dirPdf / abs(dot(ray_dir, lightVertex.sd.N));
-            float3 wi = lightVertex.sd.posW - vertex.sd.posW;
-            lightVertex.beta = lightVertex.beta * abs(dot(normalize(wi), lightVertex.sd.N)) / dot(wi, wi);
-            float3 lightPos = computeRayOrigin(lightVertex.sd.posW, lightVertex.sd.N);
-            float3 origin = pvertex.getRayOrigin(lightPos - sd.posW);
-            float3 toLight = lightPos - origin;
-            float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
-            float distance = sqrt(distSqr);
-            float3 dir = toLight / distance;
-            
-            Ray ray = Ray(origin, dir, 0, distance);
-            float3 weight = bsdf.eval(sd, dir, path.sg);
-            float3 Lr = vertex.beta * weight * lightVertex.beta;
-/*
-            Ray ray = ls.getVisibilityRay();
-            float3 weight = bsdf.eval(sd, ls.dir, path.sg);
-            float3 Lr = vertex.beta * weight * ls.Li;
-*/
-            if (params.hasFlag(BDPTFlags::s1) && any(Lr > 0.f))
+            Vertex lightVertex = {};
+            float3 ray_dir;
+            float dirPdf;
+            validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
+
+            ray_dir = normalize(lightVertex.sd.posW - pvertex.pos);
+
+            float cosTheta = dot(pvertex.normal, ray_dir);
+            // Flip the face normal to point in the same hemisphere as the shading normal.
+            float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
+            float cosThetaFace = dot(faceNormal, ray_dir);
+            if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) validSample = false;
+            if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) validSample = false;
+
+            if (validSample)
             {
-                //Ray ray = ls.getVisibilityRay();
-                logTraceRay(PixelStatsRayType::Visibility);
-                bool visible = vq.traceVisibilityRay(ray);
-                // visible = true;
-                if (visible) path.L += Lr * BDPTMIS(path, lightVertex, vertex, de);
+                lightVertex.beta = lightVertex.beta * dirPdf; // / abs(dot(ray_dir, lightVertex.sd.N));
+                float3 wi = lightVertex.sd.posW - vertex.sd.posW;
+                lightVertex.beta = lightVertex.beta * abs(dot(normalize(wi), lightVertex.sd.N)) / dot(wi, wi);
+                float3 lightPos = computeRayOrigin(lightVertex.sd.posW, lightVertex.sd.N);
+                float3 origin = pvertex.getRayOrigin(lightPos - sd.posW);
+                float3 toLight = lightPos - origin;
+                float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
+                float distance = sqrt(distSqr);
+                float3 dir = toLight / distance;
+
+                Ray ray = Ray(origin, dir, 0, distance);
+                float3 weight = bsdf.eval(sd, dir, path.sg);
+                float3 Lr = vertex.beta * weight * lightVertex.beta;
+
+                if (params.hasFlag(BDPTFlags::s1) && any(Lr > 0.f))
+                {
+                    // Ray ray = ls.getVisibilityRay();
+                    logTraceRay(PixelStatsRayType::Visibility);
+                    bool visible = vq.traceVisibilityRay(ray);
+                    // visible = true;
+                    if (visible) path.L += Lr * BDPTMIS(path, lightVertex, vertex, de);
+                }
             }
         }
-        
-        
+       
         // s == 0
 
         bool computeEmissive = kUseEmissiveLights;
@@ -1407,7 +1412,7 @@ struct PathTracer
         return base + path.getVertexIndex() - 1 + offset;
     }
 
-    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout PathState path, bool fr0 = true, bool g = true, bool fr1 = true) {
+    float3 RISWeight(Vertex cameraPathEnd, Vertex sample, inout PathState path, const float3 beta, bool fr0 = true, bool g = true, bool fr1 = true) {
         // RISBDPT
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const HitType hitType = path.hit.getType();
@@ -1415,7 +1420,7 @@ struct PathTracer
 
         let lod = createTextureSampler(path, false, isTriangleHit);
 
-        float3 result = sample.beta;
+        float3 result = beta;
         //f = result;
 
         result *= g ? G(cameraPathEnd, sample) : 1;
@@ -1505,7 +1510,23 @@ struct PathTracer
         return ray;
     }
 
-    inline bool firstChildWeight(Vertex v, inout float prob0, inout PathState path, int child0, int child1)
+    Ray getVisibiliyTestRay(Vertex v, VertexInfo lightInfo) {
+        PathVertex pVertexCameraSide = PathVertex(2, v.sd.posW, v.sd.N, v.sd.faceN);
+        PathVertex pVertexLigthSide = PathVertex(2, lightInfo.origin, lightInfo.dir, lightInfo.dir);
+
+        float3 cameraSideOrigin = pVertexCameraSide.getRayOrigin(lightInfo.origin - v.sd.posW);
+        float3 lightSideOrigin = pVertexLigthSide.getRayOrigin(v.sd.posW - lightInfo.origin);
+
+        float3 toLight = lightSideOrigin - cameraSideOrigin;
+        float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
+        float distance = sqrt(distSqr);
+        float3 dir = toLight / distance;
+
+        Ray ray = Ray(cameraSideOrigin, dir, 0, distance);
+        return ray;
+    }
+
+    inline bool firstChildWeight(Vertex v, inout float prob0, inout PathState path, int child0, int child1, IBSDF bsdf, bool upper, bool lower)
     {
         Node c0 = nodes[child0];
         Node c1 = nodes[child1];
@@ -1531,44 +1552,30 @@ struct PathTracer
         float3 c1_boundMin = c1.boundMin;
         float3 c1_boundMax = c1.boundMax;
 
-        // Compute the weights
-
-        float geom0 = 1;
-        float geom1 = 1;
         float3 p = v.sd.posW;
-        float3 N = v.sd.N;
-        geom0 = GeomTermBound(p, N, c0_boundMin, c0_boundMax);
-        geom1 = GeomTermBound(p, N, c1_boundMin, c1_boundMax);
-
-        if (geom0 + geom1 == 0)
-            return false;
-
-        if (geom0 == 0)
-        {
-            prob0 = 0;
-            return true;
-        }
-        else if (geom1 == 0)
-        {
-            prob0 = 1;
-            return true;
-        }
 /*
-        Vertex vc0 = LightPathsVertexsBuffer[c0.ID].unpack(false);
-        Vertex vc1 = LightPathsVertexsBuffer[c1.ID].unpack(false);
-        float3 d0 = normalize(vc0.sd.posW - p);
-        float3 d1 = normalize(vc1.sd.posW - p);
-        float cos0 = abs(dot(d0, vc0.sd.N)) * abs(dot(d0, N));
-        float cos1 = abs(dot(d1, vc0.sd.N)) * abs(dot(d1, N));
-        float M0 = getIntensity(RISWeight(v, vc0, path, true, false, true));
-        float M1 = getIntensity(RISWeight(v, vc1, path, true, false, true));
+        float3 center0 = (c0_boundMin + c0_boundMax) / 2;
+        float3 center1 = (c1_boundMin + c1_boundMax) / 2;
+        float3 wo0 = center0 - p;
+        float3 wo1 = center1 - p;
+        float dist0 = length(wo0);
+        float r0 = length(c0_boundMin - c0_boundMax) / 2;
+        float dist1 = length(wo1);
+        float r1 = length(c1_boundMin - c1_boundMax) / 2;
+        // Compute the weights
+        bool isTheVertexInTheBox = (all(p >= c0_boundMin) && all(p <= c0_boundMax)) || (all(p >= c1_boundMin) && all(p <= c1_boundMax));
+        bool isSpreadAngleSmallEnough = (r0 < 0.8 * dist0) && (r1 < 0.8 * dist1);
 
-        if (M0 + M1 == 0) {
-            return
+        if ((!isTheVertexInTheBox) && isSpreadAngleSmallEnough && (upper || lower)) {
+            c0_intensity *= getIntensity(bsdf.eval(v.sd, wo0, path.sg));
+            c1_intensity *= getIntensity(bsdf.eval(v.sd, wo1, path.sg));
         }
 */
-        float intensGeom0 = c0_intensity * geom0;
-        float intensGeom1 = c1_intensity * geom1;
+
+        float intensGeom0 = c0_intensity;
+        float intensGeom1 = c1_intensity;
+
+        //prob0 = c0_intensity / (c1_intensity + c0_intensity);
 
         float l2_min0;
         float l2_min1;
@@ -1584,7 +1591,7 @@ struct PathTracer
         return true;
     }
 
-    inline bool selectVertex(inout uint nid, inout float r, inout double nprob, inout PathState path,Vertex v)
+    inline bool selectVertex(inout uint nid, inout float r, inout double nprob, inout PathState path, Vertex v, IBSDF bsdf, bool upper, bool lower)
     {
         bool deadBranch = false;
         while (nid < leafNodeStart)
@@ -1592,7 +1599,7 @@ struct PathTracer
             uint c0_id = nid << 1;
             uint c1_id = c0_id + 1;
             float prob0;
-            bool x = firstChildWeight(v, prob0, path, c0_id, c1_id);
+            bool x = firstChildWeight(v, prob0, path, c0_id, c1_id, bsdf, upper, lower);
             if (x)
             {
                 nid = (r < prob0) ? c0_id : c1_id;
@@ -1609,29 +1616,88 @@ struct PathTracer
         return deadBranch;
     }
 
-    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in float de){
+    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in float de, in bool sampleUpper, in bool sampleLower){
         // select several valid vertex from the light path
+
+        const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+
+        let lod = createTextureSampler(path, false, isTriangleHit);
+
+        const IBSDF bsdf = gScene.materials.getBSDF(v.sd, lod);
+
         double nprob = 1.0;
         float r = sampleNext1D(path.sg);
         uint nid = 1;
-        bool deadBranch = selectVertex(nid, r, nprob, path, v);
+        //uint nodeId;
+        bool deadBranch = selectVertex(nid, r, nprob, path, v, bsdf, sampleUpper, sampleLower);
 
         float one_over_prob = (nprob == 0.0) ? 0.0 : 1.0 / float(nprob);
 
         if (deadBranch) return;
+        /*
+        if (params.hasFlag(BDPTFlags::t1)) {
+            
+            nid = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+            one_over_prob = counter;
+        }
+        */
+        Node sampleNode = nodes[nid];
+        uint sampleIndex = sampleNode.ID;
 
-        uint sampleIndex = nodes[nid].ID;
+        VertexInfo sampleInfo = finalLightPathsVertexsBuffer[sampleIndex];
 
-        Vertex sample = LightPathsVertexsBuffer[sampleIndex].unpack(false);
-        float3 result_q = RISWeight(v, sample, path, false);
-        Ray ray = getVisibiliyTestRay(v, sample);
-        bool visible = vq.traceVisibilityRay(ray);
+        // one_over_prob *= sampleNode.betaSum / getIntensity(sampleInfo.beta);
+        one_over_prob /= sampleNode.pdf;
 
-        float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
+        float3 f;
+        Ray ray;
 
-        float3 f = RISWeight(v, sample, path) * BDPTMIS(path, sampleIndex, v, de);
+        if (sampleInfo.isLight()) {
+            // light
+            float3 toSample = sampleInfo.origin - v.sd.posW;
+            float dist2 = dot(toSample, toSample);
+            toSample /= sqrt(dist2);
 
-        path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? inv_M * f * one_over_prob : 0;
+            const uint lobes = bsdf.getLobes(v.sd);
+
+            float g = dot(normalize(sampleInfo.dir), -toSample) / dist2;
+
+            ray = getVisibiliyTestRay(v, sampleInfo);
+
+            f = bsdf.eval(v.sd, toSample, path.sg) * g * sampleInfo.beta * BDPTMIS(path, sampleInfo, v, de);
+        }
+        else
+        {
+            // others
+            Vertex sample = LightPathsVertexsBuffer[sampleIndex].unpack(false);
+/*
+            uint start = max(nid - 5, leafNodeStart);
+            uint end = min(nid + 5, 2 * leafNodeStart - 1);
+            uint filterCounter = 0;
+            float3 accumulativeBeta = 0;
+
+            for (; start + filterCounter <= end; ++filterCounter) {
+                uint neignborNodeId = start + filterCounter;
+                uint neighborIndex = nodes[neignborNodeId].ID;
+                accumulativeBeta += LightPathsVertexsBuffer[neighborIndex].beta;
+            }
+*/
+            // float3 result_q = RISWeight(v, sample, path, false);
+            ray = getVisibiliyTestRay(v, sample);
+
+            //float3 meanBeta = accumulativeBeta;
+
+            f = RISWeight(v, sample, path, sample.beta) * BDPTMIS(path, sampleIndex, v, de);
+        }
+
+        bool visible =vq.traceVisibilityRay(ray);
+
+        float inv_M = 1.0 / float(accumulativeCounter);//float(kLightPassHeight * kLightPassWidth);
+
+        path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? inv_M * v.beta * f * one_over_prob : 0;
+        //path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? v.beta * f : 0;
         //path.L += inv_M * f * one_over_prob;
     }
 
@@ -1654,7 +1720,36 @@ struct PathTracer
         const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
         float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wo), qs);
 
-        return 1.f / (de * pdfRev + 1 + dl * pdfFwd);
+        float N = isPrimaryHit ? 2.0 : 1.0;
+
+        return 1.f / (de * pdfRev + N + dl * pdfFwd);
+    }
+
+    float BDPTMIS(PathState path, VertexInfo lightVertexInfo, Vertex v, float de) {
+        const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+
+        let lod = createTextureSampler(path, isPrimaryHit, isTriangleHit);
+
+        Vertex pt = v;
+
+        float dl = lightVertexInfo.de;
+        float3 wi = normalize(pt.sd.posW - lightVertexInfo.origin);
+
+        float pdfRev;
+        if (dot(wi, wi) == 0) {
+            pdfRev = 0;
+        }
+        else {
+            float invDist2 = 1 / dot(wi, wi);
+            pdfRev = dot(wi, lightVertexInfo.dir) * M_1_PI * abs(dot(pt.sd.N, wi * sqrt(invDist2))) * invDist2;
+        }
+
+        const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
+        float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wi), lightVertexInfo.origin, lightVertexInfo.dir);
+
+        return 1.f / (de * pdfRev + 2 + dl * pdfFwd);
     }
 
     float BDPTMIS(PathState path, Vertex lightVertex, Vertex v, float de) {
@@ -1674,7 +1769,7 @@ struct PathTracer
         const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
         float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wi), qs);
 
-        return 1.f / (de * pdfRev + 1 + dl * pdfFwd);
+        return 1.f / (de * pdfRev + 2 + dl * pdfFwd);
     }
 
     float BDPTMIS(PathState path, TriangleLightHit hit, float de) {

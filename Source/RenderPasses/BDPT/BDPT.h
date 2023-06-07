@@ -112,10 +112,10 @@ private:
     {
         // Rendering parameters
         uint32_t    samplesPerPixel = 1;                        ///< Number of samples (paths) per pixel, unless a sample density map is used.
-        uint32_t    maxSurfaceBounces = 20;                      ///< Max number of surface bounces (diffuse + specular + transmission), up to kMaxPathLenth. This will be initialized at startup.
-        uint32_t    maxDiffuseBounces = 20;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
-        uint32_t    maxSpecularBounces = 20;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
-        uint32_t    maxTransmissionBounces = 20;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
+        uint32_t    maxSurfaceBounces = 10;                      ///< Max number of surface bounces (diffuse + specular + transmission), up to kMaxPathLenth. This will be initialized at startup.
+        uint32_t    maxDiffuseBounces = 10;                      ///< Max number of diffuse bounces (0 = direct only), up to kMaxBounces.
+        uint32_t    maxSpecularBounces = 10;                     ///< Max number of specular bounces (0 = direct only), up to kMaxBounces.
+        uint32_t    maxTransmissionBounces = 10;                ///< Max number of transmission bounces (0 = none), up to kMaxBounces.
         uint32_t    lightPassWidth = 128;                        ///<
         uint32_t    lightPassHeight = 128;
         uint32_t    candidateNumber = 8;
@@ -205,6 +205,12 @@ private:
     Buffer::SharedPtr               mpLightPathVertexBuffer;    ///<
     Buffer::SharedPtr               mpLightPathsIndexBuffer;
     Buffer::SharedPtr               mpLightPathsVertexsPositionBuffer;
+
+    Buffer::SharedPtr               mpPrevLightPathVertexBuffer;    ///<
+    Buffer::SharedPtr               mpPrevLightPathsIndexBuffer;
+    Buffer::SharedPtr               mpPrevLightPathsVertexsPositionBuffer;
+
+    Buffer::SharedPtr               mpSortWorkspace;
     Buffer::SharedPtr               KeyIndexList;
     //Buffer::SharedPtr               mpCameraPathsVertexsReservoirBuffer;
     //Buffer::SharedPtr               mpCameraPathsIndexBuffer;

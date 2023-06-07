@@ -537,13 +537,13 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //mParams.LightPathsIndexBufferLength = 0;
     //pRenderContext->clearUAV(mpLightPathVertexBuffer->getUAV().get(), zero4);
     //pRenderContext->clearUAV(mpLightPathsIndexBuffer->getUAV().get(), zero4);
-    pRenderContext->uavBarrier(mpLightPathsIndexBuffer->getUAVCounter().get());
-    pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
+    pRenderContext->uavBarrier(mpSortWorkspace->getUAVCounter().get());
+    pRenderContext->clearUAVCounter(mpSortWorkspace, 0);
     FALCOR_ASSERT(mpTraceLightPath);
     tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
 
     pRenderContext->uavBarrier(mpLightPathVertexBuffer.get());
-    pRenderContext->uavBarrier(mpLightPathsIndexBuffer.get());
+    pRenderContext->uavBarrier(mpSortWorkspace.get());
     //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer->getUAVCounter().get());
     //pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
     //pRenderContext->uavBarrier(mpMCounter.get());
@@ -553,19 +553,25 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
     //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
 
-    auto kCounterPtr = (uint*)mpLightPathsIndexBuffer->getUAVCounter()->map(Buffer::MapType::Read);
+    auto kCounterPtr = (uint*)mpSortWorkspace->getUAVCounter()->map(Buffer::MapType::Read);
     uint counter = *kCounterPtr;
-    mpSortPass->setListCount(counter);
+    mpSortPass->setListCount(counter + mpTreeBuilder->getPrevCounter(), mpSortWorkspace);
     mpSortPass->sort(pRenderContext);
-
-    mpTreeBuilder->update(counter);
-    mpTreeBuilder->build(pRenderContext);
     //mpSortPass->sortTest(pRenderContext, renderData.getTexture(kOutputColor), mParams.frameDim);
+    //logWarning("yes it work");
+    pRenderContext->clearUAV(KeyIndexList->getUAV().get(), zero4);
+    mpTreeBuilder->update(counter, mParams.frameCount, mpSortWorkspace, mpPrevLightPathsVertexsPositionBuffer, KeyIndexList, mpLightPathsVertexsPositionBuffer, mpLightPathVertexBuffer, mpPrevLightPathVertexBuffer);
+    mpTreeBuilder->build(pRenderContext);
+    
 
+    char msg[100];
+    std::sprintf(msg, "%d, %d, %f", counter, mpTreeBuilder->getPrevCounter(), mpTreeBuilder->getTotalBetaSum());
+    logWarning(msg);
     pRenderContext->uavBarrier(mpTreeBuilder->getTree().get());
     FALCOR_ASSERT(mpTraceCameraPath);
     auto var = mpPathTracerBlock->getRootVar();
     var["leafNodeStart"] = mpTreeBuilder->getLeafNodeStartIndex();
+    var["counter"] = counter;
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
     
     pRenderContext->uavBarrier(mpOutput.get());
@@ -592,7 +598,7 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
     widget.tooltip("Number of samples per pixel. One path is traced for each sample.\n\n"
         "When the '" + kInputSampleCount + "' input is connected, the number of samples per pixel is loaded from the texture.");
 
-    if (widget.var("Max surface bounces", mStaticParams.maxSurfaceBounces, 0u, 5u))
+    if (widget.var("Max surface bounces", mStaticParams.maxSurfaceBounces, 0u, 20u))
     {
         // Allow users to change the max surface bounce parameter in the UI to clamp all other surface bounce parameters.
         mStaticParams.maxDiffuseBounces = std::min(mStaticParams.maxDiffuseBounces, mStaticParams.maxSurfaceBounces);
@@ -603,13 +609,13 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
     widget.tooltip("Maximum number of surface bounces (diffuse + specular + transmission).\n"
         "Note that specular reflection events from a material with a roughness greater than specularRoughnessThreshold are also classified as diffuse events.");
 
-    dirty |= widget.var("Max diffuse bounces", mStaticParams.maxDiffuseBounces, 0u, 5u);
+    dirty |= widget.var("Max diffuse bounces", mStaticParams.maxDiffuseBounces, 0u, 20u);
     widget.tooltip("Maximum number of diffuse bounces.\n0 = direct only\n1 = one indirect bounce etc.");
 
-    dirty |= widget.var("Max specular bounces", mStaticParams.maxSpecularBounces, 0u, 5u);
+    dirty |= widget.var("Max specular bounces", mStaticParams.maxSpecularBounces, 0u, 20u);
     widget.tooltip("Maximum number of specular bounces.\n0 = direct only\n1 = one indirect bounce etc.");
 
-    dirty |= widget.var("Max transmission bounces", mStaticParams.maxTransmissionBounces, 0u, 5u);
+    dirty |= widget.var("Max transmission bounces", mStaticParams.maxTransmissionBounces, 0u, 20u);
     widget.tooltip("Maximum number of transmission bounces.\n0 = no transmission\n1 = one transmission bounce etc.");
 
     // Sampling options.
@@ -1305,15 +1311,22 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     //TODO: change height
     uint32_t lightVertexElementCount = mStaticParams.lightPassWidth * mStaticParams.lightPassHeight * mStaticParams.maxSurfaceBounces;
     uint32_t cameraVertexElementCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
-    if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
-    if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount);
-    if (!mpLightPathsVertexsPositionBuffer) mpLightPathsVertexsPositionBuffer = Buffer::createStructured(var["LightPathsVertexsPositionBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    if (!mpLightPathVertexBuffer) mpLightPathVertexBuffer = Buffer::createStructured(var["LightPathsVertexsBuffer"], 2 * lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //if (!mpLightPathsIndexBuffer) mpLightPathsIndexBuffer = Buffer::createStructured(var["LightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, true);
+    if (!mpLightPathsVertexsPositionBuffer) mpLightPathsVertexsPositionBuffer = Buffer::createStructured(var["LightPathsVertexsPositionBuffer"], 2 * lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+
+    if (!mpPrevLightPathVertexBuffer) mpPrevLightPathVertexBuffer = Buffer::createStructured(var["PrevLightPathsVertexsBuffer"], 2 * lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+    //if (!mpPrevLightPathsIndexBuffer) mpPrevLightPathsIndexBuffer = Buffer::createStructured(var["PrevLightPathsIndexBuffer"], lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, true);
+    if (!mpPrevLightPathsVertexsPositionBuffer) mpPrevLightPathsVertexsPositionBuffer = Buffer::createStructured(var["PrevLightPathsVertexsPositionBuffer"], 2 * lightVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+
+    if (!mpSortWorkspace) mpSortWorkspace = Buffer::createStructured(var["SortWorkspace"], 2 * lightVertexElementCount);
+    if (!KeyIndexList) KeyIndexList = Buffer::createStructured(var["KeyIndexList"], 2 * lightVertexElementCount);
     //if (!mpCameraPathsVertexsReservoirBuffer) mpCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["CameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
 
-    if (!mpSortPass) mpSortPass = std::make_unique<Bitonic64Sort>(mpLightPathsIndexBuffer, 0);
-    if (!mpTreeBuilder) mpTreeBuilder = std::make_unique<VertexTreeBuilder>(mpLightPathsIndexBuffer, mpLightPathsVertexsPositionBuffer, lightVertexElementCount);
+    if (!mpSortPass) mpSortPass = std::make_unique<Bitonic64Sort>(mpSortWorkspace, 0);
+    if (!mpTreeBuilder) mpTreeBuilder = std::make_unique<VertexTreeBuilder>(mpSortWorkspace, mpLightPathsVertexsPositionBuffer, lightVertexElementCount);
     //if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
     //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
@@ -1350,6 +1363,8 @@ void BDPT::preparePathTracer(const RenderData& renderData)
     auto var = mpPathTracerBlock->getRootVar();
     var["corner"] = mpScene->getSceneBounds().minPoint;
     var["dimension"] = mpScene->getSceneBounds().maxPoint - mpScene->getSceneBounds().minPoint;
+    var["prevCounter"] = mpTreeBuilder->getPrevCounter();
+    var["accumulativeCounter"] = mpTreeBuilder->getAccumulativeCounter();
     setShaderData(var, renderData);
 }
 
@@ -1362,15 +1377,19 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
 
         //var["sampleOffset"] = mpSampleOffset; // Can be nullptr
         //var["sampleColor"] = mpSampleColor;
-        var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
-        var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
-        var["LightPathsVertexsPositionBuffer"] = mpLightPathsVertexsPositionBuffer;
-        var["nodes"] = mpTreeBuilder->getTree();
+        
+        
         //var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
         //var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
         //var["MCounter"] = mpMCounter;
         //var["sampleGuideData"] = mpSampleGuideData;
     }
+
+    var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+    var["finalLightPathsVertexsBuffer"] = mpPrevLightPathVertexBuffer;
+    var["LightPathsIndexBuffer"] = mpSortWorkspace;
+    var["LightPathsVertexsPositionBuffer"] = mpLightPathsVertexsPositionBuffer;
+    var["nodes"] = mpTreeBuilder->getTree();
 
     // Bind runtime data.
     //setNRDData(var["outputNRD"], renderData);
@@ -1560,8 +1579,13 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     //uint32_t zero = 0;
     //pRenderContext->clearUAV(mpCameraPathsVertexsReservoirBuffer->getUAV().get(), zero4);
     pRenderContext->clearUAV(mpOutput->getUAV().get(), zero4);
-    
-    
+    //std::swap(mpLightPathsIndexBuffer, mpPrevLightPathsIndexBuffer);
+    std::swap(mpLightPathVertexBuffer, mpPrevLightPathVertexBuffer);
+    std::swap(mpLightPathsVertexsPositionBuffer, mpPrevLightPathsVertexsPositionBuffer);
+    std::swap(mpSortWorkspace, KeyIndexList);
+
+    mpTreeBuilder->endFrame(pRenderContext);
+
     mVarsChanged = false;
     mParams.frameCount++;
 }

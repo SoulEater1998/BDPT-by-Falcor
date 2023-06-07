@@ -74,8 +74,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 node.boundMin = min(srcNode.boundMin, node.boundMin);
                 node.boundMax = max(srcNode.boundMax, node.boundMax);
             }
-
-        nodes[dstNodeArr] = node;
         }
+        nodes[dstNodeArr] = node;
     }
 }

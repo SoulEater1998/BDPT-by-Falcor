@@ -13,30 +13,51 @@ VertexTreeBuilder::VertexTreeBuilder(Buffer::SharedPtr _KeyIndexBuffer, Buffer::
     uint maxNodesNum = maxLeafNodesNum << 1;
 
     Nodes = Buffer::createStructured(sizeof(Node), maxNodesNum);
+    PrevNodes = Buffer::createStructured(sizeof(Node), maxNodesNum);
 
     GenLevelZeroCS = ComputePass::create(kGenLevelZeroFromVertexsFilename, "main");
     //GenLevelZeroCS->getProgram()->setDefines(defines);
     GenInternalLevelCS = ComputePass::create(kGenInternalLevelFilename, "main");
 
-    GenLevelZeroCS["keyIndexList"] = _KeyIndexBuffer;
-    GenLevelZeroCS["posAndIntensityBuffer"] = _VertexBuffer;
-    GenLevelZeroCS["nodes"] = Nodes;
+    //GenLevelZeroCS["keyIndexList"] = _KeyIndexBuffer;
+    //GenLevelZeroCS["posAndIntensityBuffer"] = _VertexBuffer;
+    //GenLevelZeroCS["nodes"] = Nodes;
 
-    GenInternalLevelCS["nodes"] = Nodes;
+    //GenInternalLevelCS["nodes"] = Nodes;
+    prevCounter = 0;
+    accumulativeCounter = 0;
 }
 
-void VertexTreeBuilder::update(uint counter) {
-    realLeafNodesNum = counter;
-    leafNodesNum = counter == 0 ? 0 : 1 << int(ceil(log2((double)counter)));
-    treeLevels = uint(ceil(log2((double)counter))) + 1;
+void VertexTreeBuilder::update(uint counter, uint frame,
+                            Buffer::SharedPtr _KeyIndexBuffer,
+                            Buffer::SharedPtr _PosAndIntensityBuffer,
+                            Buffer::SharedPtr _targetKeyIndexBuffer,
+                            Buffer::SharedPtr _NewPosAndIntensityBuffer,
+                            Buffer::SharedPtr _NewLightPathsVertexsBuffer,
+                            Buffer::SharedPtr _LightPathsVertexsBuffer) {
+    realLeafNodesNum = (counter + prevCounter + 1) / 2;
+    leafNodesNum = realLeafNodesNum == 0 ? 0 : 1 << int(ceil(log2((double)realLeafNodesNum)));
+    treeLevels = uint(ceil(log2((double)realLeafNodesNum))) + 1;
     nodesNum = leafNodesNum << 1;
+    accumulativeCounter += counter;
+    //accumulativeCounter = std::max(accumulativeCounter, 20 * counter);
+
+    GenLevelZeroCS["keyIndexList"] = _KeyIndexBuffer;
+    GenLevelZeroCS["targetKeyIndexList"] = _targetKeyIndexBuffer;
+    GenLevelZeroCS["NewPosAndIntensityBuffer"] = _NewPosAndIntensityBuffer;
+    GenLevelZeroCS["PosAndIntensityBuffer"] = _PosAndIntensityBuffer;
+    GenLevelZeroCS["NewLightPathsVertexsBuffer"] = _NewLightPathsVertexsBuffer;
+    GenLevelZeroCS["LightPathsVertexsBuffer"] = _LightPathsVertexsBuffer;
+    GenLevelZeroCS["CSConstants"]["frame"] = frame;
+    
 }
 
 void VertexTreeBuilder::GenLevelZero(RenderContext* pRenderContext) {
     GenLevelZeroCS["CSConstants"]["numLeafNodes"] = leafNodesNum;
     GenLevelZeroCS["CSConstants"]["numLevels"] = treeLevels;
     GenLevelZeroCS["CSConstants"]["counter"] = realLeafNodesNum;
-    
+    GenLevelZeroCS["CSConstants"]["scaling"] = (accumulativeCounter < 20 * realLeafNodesNum) ? 1 : (float(20 * realLeafNodesNum) / accumulativeCounter);
+    accumulativeCounter = std::min(accumulativeCounter, 20 * realLeafNodesNum);
     GenLevelZeroCS->execute(pRenderContext, leafNodesNum, 1);
 }
 
@@ -72,6 +93,17 @@ void VertexTreeBuilder::build(RenderContext* pRenderContext) {
     //GenLevelZeroCS["gScene"] = gScene;
     //GenInternalLevelCS["gScene"] = gScene;
     pRenderContext->uavBarrier(KeyIndexBuffer.get());
+
+    
+    GenLevelZeroCS["nodes"] = Nodes;
+    GenLevelZeroCS["prevNodes"] = PrevNodes;
+    GenInternalLevelCS["nodes"] = Nodes;
+
     GenLevelZero(pRenderContext);
     GenInternalLevel(pRenderContext);
+}
+
+void VertexTreeBuilder::endFrame(RenderContext* pRenderContext) {
+    std::swap(Nodes, PrevNodes);
+    prevCounter = realLeafNodesNum;
 }

@@ -5,4 +5,5 @@ struct Node
     float betaSum;
     float3 boundMax;
     uint ID;
+    float pdf;
 };
