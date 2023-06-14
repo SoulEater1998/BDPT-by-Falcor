@@ -1568,8 +1568,8 @@ struct PathTracer
         }
 */
 
-        float intensGeom0 = c0_intensity;
-        float intensGeom1 = c1_intensity;
+        float intensGeom0 = c0_intensity / getSolidAngle(v.sd.posW, c0_boundMin, c0_boundMax);
+        float intensGeom1 = c1_intensity / getSolidAngle(v.sd.posW, c1_boundMin, c1_boundMax);
 
         //prob0 = c0_intensity / (c1_intensity + c0_intensity);
 
@@ -1718,13 +1718,6 @@ struct PathTracer
         double nprob = 1.0;
         float r = sampleNext1D(path.sg);
         uint nid = 1;
-        // uint nodeId;
-        //uint cut[16];
-        //uint endPoint = getCut(cut, v.sd.posW);
-
-       // for (uint i = 0; i <= endPoint; ++i) {
-            //nid = 
-        //}
 
         bool deadBranch = selectVertex(nid, r, nprob, path, v, bsdf, sampleUpper, sampleLower);
 
