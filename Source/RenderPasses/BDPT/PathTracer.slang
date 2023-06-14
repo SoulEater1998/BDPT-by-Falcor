@@ -1612,6 +1612,98 @@ struct PathTracer
         return deadBranch;
     }
 
+    float solidanglecount(float startline, float endline, float startrow, float endrow, float high) {
+        float result = 0;
+        if (high != 0)
+            result = asin(sqrt(endline * endline * endrow * endrow / ((endline * endline + high * high) * (endrow * endrow + high * high))))
+		        - asin(sqrt(startline * startline * endrow * endrow / ((startline * startline + high * high) * (endrow * endrow + high * high))))
+		       - asin(sqrt(endline * endline * startrow * startrow / ((endline * endline + high * high) * (startrow * startrow + high * high))))
+		        + asin(sqrt(startline * startline * startrow * startrow / ((startline * startline + high * high) * (startrow * startrow + high * high))));
+        else
+            result = 0;
+        return result;
+    }
+
+    float getSolidAngle(float3 p, float3 boundMin, float3 boundMax) {
+        float3 toMin = boundMin - p;
+        float3 toMax = boundMax - p;
+        float3 a = float3(toMin.x, toMin.y, toMax.z);
+        float3 b = float3(toMin.x, toMax.y, toMin.z);
+        float3 c = float3(toMax.x, toMin.y, toMin.z);
+        float3 d = float3(toMin.x, toMax.y, toMax.z);
+        float3 e = float3(toMax.x, toMin.y, toMax.z);
+        float3 f = float3(toMax.x, toMax.y, toMin.z);
+        if (all(toMax >= 0) && all(toMin <= 0)) {
+            if (all(toMax > 0) && all(toMin < 0)) { 
+                //in the box
+                return M_4PI;
+            }
+            if (all(toMin == 0) || all(toMax == 0) || all(a == 0) || all(b == 0) || all(c == 0) || all(d == 0) || all(e == 0) || all(f == 0)) { 
+                //at the vertexs of the box
+                return M_PI_2;
+            }
+            if (any(toMax == 0) && any(toMin == 0)) {
+                //at the edges of the box
+                return M_PI;
+            }
+            //at the surfaces of the box
+            return M_2PI;
+        }
+
+        
+        float result = 0;
+        result += toMin.x > 0 ? solidanglecount(toMin.y, toMax.y, toMin.z, toMax.z, toMin.x) : 0;
+        result += toMin.y > 0 ? solidanglecount(toMin.x, toMax.x, toMin.z, toMax.z, toMin.y) : 0;
+        result += toMin.z > 0 ? solidanglecount(toMin.x, toMax.x, toMin.y, toMax.y, toMin.z) : 0;
+
+        result += toMax.x < 0 ? solidanglecount(toMin.y, toMax.y, toMin.z, toMax.z, toMax.x) : 0;
+        result += toMax.y < 0 ? solidanglecount(toMin.x, toMax.x, toMin.z, toMax.z, toMax.y) : 0;
+        result += toMax.z < 0 ? solidanglecount(toMin.x, toMax.x, toMin.y, toMax.y, toMax.z) : 0;
+        
+        return result;
+    }
+
+    uint getCut(inout uint cut[16], const float3 p) {
+        cut[0] = 1;
+        uint endPoint = 0;
+
+        float solidAngles[16];
+
+        uint maxId = 0;
+        float maxSolidAngle = -1e10;
+
+        const uint clusterNum = 8;//TODO::params
+
+        while (endPoint < clusterNum) {
+            uint id = maxId;
+            uint nodeId = cut[maxId];
+            uint pChild = nodeId << 1;
+            uint sChild = pChild + 1;
+
+            Node pNode = nodes[pChild];
+            Node sNode = nodes[sChild];
+
+            cut[id] = pChild;
+            solidAngles[id] = getSolidAngle(p, pNode.boundMin, pNode.boundMax);
+
+            if (sNode.betaSum > 0) {
+                endPoint++;
+                cut[endPoint] = sChild;
+                solidAngles[endPoint] = getSolidAngle(p, sNode.boundMin, sNode.boundMax);
+            }
+
+            maxSolidAngle = -1e10;
+            for (uint i = 0; i <= endPoint; ++i) {
+                if (solidAngles[i] > maxSolidAngle) {
+                    maxSolidAngle = solidAngles[i];
+                    maxId = i;
+                }
+            }
+        }
+
+        return endPoint;
+    }
+
     void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in float de, in bool sampleUpper, in bool sampleLower){
         // select several valid vertex from the light path
 
@@ -1626,7 +1718,14 @@ struct PathTracer
         double nprob = 1.0;
         float r = sampleNext1D(path.sg);
         uint nid = 1;
-        //uint nodeId;
+        // uint nodeId;
+        //uint cut[16];
+        //uint endPoint = getCut(cut, v.sd.posW);
+
+       // for (uint i = 0; i <= endPoint; ++i) {
+            //nid = 
+        //}
+
         bool deadBranch = selectVertex(nid, r, nprob, path, v, bsdf, sampleUpper, sampleLower);
 
         float one_over_prob = (nprob == 0.0) ? 0.0 : 1.0 / float(nprob);
