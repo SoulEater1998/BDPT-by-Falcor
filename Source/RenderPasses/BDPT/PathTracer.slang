@@ -1568,8 +1568,8 @@ struct PathTracer
         }
 */
 
-        float intensGeom0 = c0_intensity / getSolidAngle(v.sd.posW, c0_boundMin, c0_boundMax);
-        float intensGeom1 = c1_intensity / getSolidAngle(v.sd.posW, c1_boundMin, c1_boundMax);
+        float intensGeom0 = c0_intensity; // / getSolidAngle(v.sd.posW, c0_boundMin, c0_boundMax);
+        float intensGeom1 = c1_intensity;// / getSolidAngle(v.sd.posW, c1_boundMin, c1_boundMax);
 
         //prob0 = c0_intensity / (c1_intensity + c0_intensity);
 

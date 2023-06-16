@@ -1,6 +1,6 @@
-if(NOT FALCOR_HAS_CUDA)
-    return()
-endif()
+#if(NOT FALCOR_HAS_CUDA)
+#    return()
+#endif()
 
 add_falcor_executable(CudaInterop)
 
