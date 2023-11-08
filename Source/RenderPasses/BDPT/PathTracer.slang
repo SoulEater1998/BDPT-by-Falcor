@@ -246,6 +246,7 @@ struct PathTracer
         if (kUseViewDir) cameraRay.dir = -viewDir[pixel];
         path.origin = cameraRay.origin;
         path.dir = cameraRay.dir;
+        //path.pdf = 1.f;
 
         // Create sample generator.
         const uint maxSpp = kSamplesPerPixel > 0 ? kSamplesPerPixel : kMaxSamplesPerPixel;
@@ -1301,7 +1302,8 @@ struct PathTracer
 
         // s == 1
         // TODO:trans
-        if (isPrimaryHit) {
+/*
+        if (false) {
             bool validSample = false;
 
             // Sample a point on a light and connect it to the camera subpath
@@ -1347,7 +1349,7 @@ struct PathTracer
                 }
             }
         }
-       
+*/      
         // s == 0
 
         bool computeEmissive = kUseEmissiveLights;
