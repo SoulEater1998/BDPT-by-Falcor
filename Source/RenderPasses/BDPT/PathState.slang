@@ -64,6 +64,8 @@ enum class PathFlags
     deltaTransmissionPath       = 0x0800,   ///< Path started with and followed delta transmission events (whenever possible - TIR could be an exception) until it hit the first non-delta event.
     deltaOnlyPath               = 0x1000,   ///< There was no non-delta events along the path so far.
 
+    isFirstNonDelta             = 0x2000,   ///< for photon mapping
+    passedTransmission          = 0x4000,   
     // Bits 14 to kPathFlagsBitCount are still unused.
 };
 
@@ -99,6 +101,15 @@ struct PathState
 
     float3      thp;                    ///< Path throughput.
     float3      L;                      ///< Accumulated path contribution.
+
+    /*
+    float3      recursiveMIS;           ///< x->d, y->p, z->pPrim
+                                    ///< x: bdpt recursive MIS
+                                    ///< y: vertex merge recursive MIS
+                                    ///< z: only use primary diffuse hit vm;
+    uint        prevIndex;              ///< for vcm
+    */
+                     
 
     //GuideData   guideData;              ///< Denoiser guide data.
     InteriorList interiorList;          ///< Interior list. Keeping track of a stack of materials with medium properties.

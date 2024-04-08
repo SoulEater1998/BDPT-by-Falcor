@@ -34,6 +34,7 @@ target_sources(BDPT PRIVATE
     PathState.slang
     PathTracer.slang
     PathTracerNRD.slang
+    PhotonCulling.cs.slang
     ReflectTypes.cs.slang
     ResolvePass.cs.slang
     SortTest.cs.slang

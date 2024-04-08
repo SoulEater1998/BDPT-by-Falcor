@@ -83,6 +83,8 @@ struct PathGenerator
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
     StructuredBuffer<Node> nodes;
+
+    
     //StructuredBuffer<float4> CameraPathsIndexBuffer;
     //RWStructuredBuffer<uint> MCounter;
 

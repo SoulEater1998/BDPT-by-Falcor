@@ -14,7 +14,7 @@ struct Node
 struct VertexTreeBuilder
 {
     VertexTreeBuilder(Buffer::SharedPtr _KeyIndexBuffer, Buffer::SharedPtr _VertexBuffer, uint maxCounter);
-    void update(uint counter);
+    void update(uint counter, float m_radius);
     void build(RenderContext* pRenderContext);
 
     Buffer::SharedPtr getTree() { return Nodes; };
@@ -29,9 +29,10 @@ private:
     Buffer::SharedPtr VertexBuffer;
 
     uint realLeafNodesNum;
-    uint leafNodesNum;
+    uint leafNodesNum = 0;
     uint nodesNum;
     uint treeLevels;
+    float radius;
 
     ComputePass::SharedPtr GenLevelZeroCS;
     ComputePass::SharedPtr GenInternalLevelCS;

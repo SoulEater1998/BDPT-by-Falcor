@@ -32,6 +32,7 @@
 #include "Utils/Math/Matrix.h"
 #include "Utils/UI/Gui.h"
 #include "Scene/Animation/Animatable.h"
+#include "Scene/Transform.h"
 #include <memory>
 #include <string>
 
@@ -319,6 +320,7 @@ namespace Falcor
         */
         void setTransformMatrix(const rmcv::mat4& mtx) { mTransformMatrix = mtx; update();  }
 
+        void setTransformMatrix_T(const Transform& trans) { mTransformMatrix = trans.getMatrix(); update();}
         /** Get transform matrix
         */
         rmcv::mat4 getTransformMatrix() const { return mTransformMatrix; }

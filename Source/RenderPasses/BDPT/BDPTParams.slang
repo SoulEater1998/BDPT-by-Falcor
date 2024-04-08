@@ -81,6 +81,9 @@ enum class BDPTFlags
     temporalReuse = 0x0020,
     spatiotemporalReuse = 0x0030,
 
+    useVertexMerge = 0x0040,
+    useSubspaceBDPT = 0x0080,
+    useReservoir = 0x0100,
 };
 
 struct PathTracerParams

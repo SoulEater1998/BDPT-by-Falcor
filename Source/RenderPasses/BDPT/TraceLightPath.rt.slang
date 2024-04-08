@@ -11,6 +11,7 @@ import Utils.Math.FormatConversion;
 import PathTracer;
 
 ParameterBlock<PathTracer> gPathTracer;
+RaytracingAccelerationStructure gHitPointAS;
 Scheduler gScheduler;
 
 // Define ray indices.
@@ -79,6 +80,17 @@ struct PathPayload
     }
 };
 
+struct RISPayload
+{
+    uint4 packed; // x := sample weight(float), y := total weight(float), z := sample count, w := index
+    SampleGenerator sg;
+}
+
+struct SphereAttribs
+{
+    float2 pad;
+};
+
 struct VisibilityQuery : PathTracer::IVisibilityQuery
 {
     bool traceVisibilityRay(const Ray ray)
@@ -92,6 +104,17 @@ struct VisibilityQuery : PathTracer::IVisibilityQuery
 */
 struct Scheduler
 {
+    bool handleCollectIntersection(const float3 origin, const uint primIndex) {
+        return false;//gPathTracer.handleCollectIntersection(origin, primIndex);
+    }
+
+    void handleCollectAnyHit(inout RISPayload payload, const float3 origin, const float3 normal, const uint primIndex) {
+        // uint4 reservoir = payload.packed;
+        float rnd = sampleNext1D(payload.sg);
+        //gPathTracer.handleCollectAnyHit(payload.packed, origin, normal, primIndex, rnd);
+        // payload.packed = reservoir;
+    }
+    
     /** Handle a miss.
         \param[in,out] payload Payload data.
     */
@@ -131,7 +154,7 @@ struct Scheduler
         This replaces `PathTracer::nextHit` but without support for volume sampling.
         \param[in,out] path Path state.
     */
-    void nextHit(inout PathState path, inout float dl)
+    void nextHit(inout PathState path, inout ExtraPayload exPayload)
     {
         // Advance to next path vertex.
         path.incrementVertexIndex();
@@ -147,7 +170,7 @@ struct Scheduler
         path = PathPayload::unpack(payload);
         if (path.isActive()) {
             VisibilityQuery vq;
-            gPathTracer.lightPathHandleHit(path, vq, dl);
+            gPathTracer.lightPathHandleHit(path, vq, exPayload);
         }
     }
 
@@ -157,16 +180,16 @@ struct Scheduler
     void tracePath(uint pathID)
     {
         PathState path = {};
-        float dl = 0;
+        ExtraPayload exPayload = {};
         //sample initial ray for light subpath
-        gPathTracer.generateLightPath(pathID, path, dl);
+        gPathTracer.generateLightPath(pathID, path, exPayload);
         gPathTracer.setupPathLogging(path);
 
         // Trace path.
         
         while (path.isActive())
         {
-            nextHit(path, dl);
+            nextHit(path, exPayload);
         }
         
         //gPathTracer.pushInBuffer(path, dim.x);
@@ -303,6 +326,41 @@ void scatterSdfGridClosestHit(inout PathPayload payload, SDFGridHitData sdfGridH
     sdfGridHit.instanceID = getGeometryInstanceID();
     sdfGridHit.hitData = sdfGridHitData;
     gScheduler.handleHit(payload, HitInfo(sdfGridHit), RayTCurrent());
+}
+
+//
+// Shader entry points for neighbor collect groups.
+//
+[shader("intersection")]
+void RISIntersection()
+{
+    const float3 origin = ObjectRayOrigin();
+    const uint primIndex = PrimitiveIndex();
+
+    bool tHit = gScheduler.handleCollectIntersection(origin, primIndex);
+    SphereAttribs attribs;
+    attribs.pad = float2(1);
+    tHit = true;
+    if (tHit) {
+        ReportHit(RayTCurrent(), 0, attribs);
+    }
+}
+
+[shader("anyhit")]
+void RISAnyHit(inout RISPayload payload: SV_RayPayload, SphereAttribs pad: SV_IntersectionAttributes)
+{
+    const float3 origin = ObjectRayOrigin();
+    const float3 normal = ObjectRayDirection();
+    const uint primIndex = PrimitiveIndex();
+    payload.packed.z = 1;
+    // payload.packed.z += pad.pad.x > 0 ? 1 : 0;
+    // gScheduler.handleCollectAnyHit(payload, origin, normal, primIndex);
+}
+
+[shader("miss")]
+void RISMiss(inout RISPayload payload)
+{
+    // payload.packed.z = 10;
 }
 
 //

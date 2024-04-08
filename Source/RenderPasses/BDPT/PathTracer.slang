@@ -26,6 +26,7 @@
  # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **************************************************************************/
 #include "Utils/Math/MathConstants.slangh"
+#include "BDPTUtils.slangh"
 import Rendering.Lights.EnvMapSampler;
 import Rendering.Lights.EmissiveLightSampler;
 import Rendering.Lights.EmissiveLightSamplerHelpers;
@@ -70,6 +71,24 @@ static const uint quantLevels = 1 << 10;
     different scheduling implementations.
 */
 
+struct ExtraPayload
+{
+    float d;
+    float p;
+    //uint prevIndex;
+    float pPrim = 0.f;
+    uint RISSampleIndex;
+}
+
+struct RISSampleInfo
+{
+    float3 pos;
+    float dl;
+    float3 radiance;
+    float p;
+    float2 normal;
+}
+
 
 struct PathTracer
 {
@@ -90,6 +109,14 @@ struct PathTracer
     uint leafNodeStart;
     uint counter;
     float3 dimension;
+    float globalRadius;
+
+/*
+    float gHashScaleFactor; // Scale factor calculated from photon radius
+    uint gHashSize;         // Size of the hash
+    uint gYExtend;
+    float gGlobalRadius;
+*/
     //RWStructuredBuffer<Vertex> tempVertexBuffer;
     // Samplers
     EnvMapSampler envMapSampler;                    ///< Environment map sampler. Only valid when kUseEnvLight == true.
@@ -101,10 +128,39 @@ struct PathTracer
     Texture2D<uint> sampleCount;                    ///< Optional input sample count buffer. Only valid when kSamplesPerPixel == 0.
     Texture2D<uint> sampleOffset;                   ///< Output offset into per-sample buffers. Only valid when kSamplesPerPixel == 0.
     StructuredBuffer<Node> nodes;
-    //Buffer<uint> LightPathsIndexBufferCount;
-    
-    //uint line_number;
 
+
+    Texture2D<float4> InputFluxAndNumber;
+    Texture2D<float4> InputNormalAndRadii;
+    Texture2D<float4> InputPosAndNewRadii;
+    Texture2D<uint> InputIteration;
+    Texture2D<float2> motionVec;
+
+    // sample info
+    Texture2D<float4> samplePositionI;   // xyz := pos, w := dL
+    Texture2D<float4> hitPointPositionI; // xyz := pos, w := p_toLeft
+    Texture2D<float4> normalI;           // xyz := sample normal
+    Texture2D<float4> radianceI;         // rgb := radiance, w := radii
+
+
+    // reservoir
+    Texture2D<uint4> ReservoirI; // x := sample weight(float), y := W (float), z := sample count, w := index
+
+    // subspace weight
+    Texture2D<uint> prevSubspaceWeight;
+    Texture2D<float> prefixSum;
+    Texture1D<float> weightSum;
+    RWTexture2D<uint> SubspaceWeight;
+    RWTexture2D<uint> SubspaceCount; 
+    Texture1D<uint> countSum;
+    Texture2D<uint> prefixSumOfCount;
+
+    RWTexture2D<uint> SubspaceSecondaryMoment;
+    Texture2D<float> prefixSumOfSecondaryMoment;
+    Texture1D<float> secondaryMomentSum;
+
+    Texture1D<float> maxVariance;
+ 
     // Outputs
     RWStructuredBuffer<ColorType> sampleColor;            ///< Output per-sample color if kSamplesPerPixel != 1.
 
@@ -113,8 +169,37 @@ struct PathTracer
     RWStructuredBuffer<VertexInfo> LightPathsVertexsBuffer; ///< Output the Vertex of all the light paths.
     RWStructuredBuffer<uint2> LightPathsIndexBuffer;
     RWStructuredBuffer<float4> LightPathsVertexsPositionBuffer;
-    //RWStructuredBuffer<float4> CameraPathsIndexBuffer;
-    //RWStructuredBuffer<uint> MCounter;
+
+    RWStructuredBuffer<AABB> hitPointAABB;
+
+    // sample info
+    
+    RWTexture2D<float4> hitPointPositionO; // xyz := pos, w := p_toLeft
+    RWTexture2D<float4> normalO;           // xy := sample normal, zw := hit point normal
+    //RWTexture2D<float4> radianceO;         // rgb := radiance, w := radii
+
+    // reservoir
+    RWTexture2D<uint2> Reservoir;       // x := W (float), y := sample count(uint)
+    RWTexture2D<float4> samplePosition; // xyz := pos, w := dL
+    RWTexture2D<float4> hitPointPosition; // xyz := pos, w := p_toLeft
+    RWTexture2D<float4> normal;          // xy := sample normal, zw := hit point normal
+    RWTexture2D<float4> radiance;        // rgb := radiance
+    RWTexture2D<uint> ReservoirSignal;
+
+    RWTexture3D<uint4> pathPos;   // xyz := pos, w := index
+    RWTexture3D<float4> pathRadiance; // xyz := radiance, w := de;
+    RWTexture3D<uint4> pathHitInfo;
+
+    /*
+        RWTexture2D<PackedHitInfo> gatherPointVbuffer;
+        RWTexture2D<float4> gatherPointThp;
+        RWTexture2D<float4> gatherPointDir;
+        RWTexture2D<uint> hashBuffer;
+    */
+    RWTexture2D<float4> OutputFluxAndNumber;
+    RWTexture2D<float4> OutputNormalAndRadii;
+    RWTexture2D<float4> OutputPosAndNewRadii;
+    RWTexture2D<uint> OutputIteration;
 
     //RWStructuredBuffer<CameraVertex> CameraPathsVertexsReservoirBuffer;
    
@@ -155,6 +240,8 @@ struct PathTracer
 
         Ray getVisibilityRay() { return Ray(origin, dir, 0.f, distance); }
     };
+
+    
 
     /** Describes a path vertex.
     */
@@ -260,6 +347,7 @@ struct PathTracer
         {
             path.setHit(hit);
             path.setVertexIndex(1);
+            path.setFlag(PathFlags::isFirstNonDelta, false);
         }
     }
 
@@ -268,7 +356,7 @@ struct PathTracer
         \param[in] line Pixel per line.
         \param[out] path Path state for the primary hit.
     */
-    void generateLightPath(const uint pathID, out PathState path, out float dl)
+    void generateLightPath(const uint pathID, out PathState path, out ExtraPayload exPayload)
     {
         // intial path state
         path = {};
@@ -290,8 +378,11 @@ struct PathTracer
         lv.type = VertexType::Light;
         VertexInfo vInfo = VertexInfo::createLight(lv);
         vInfo.de = 1.0f / lv.pdfFwd;
+        vInfo.pe = 0;
+        vInfo.prevIndex = 0;
         vInfo.beta *= dirPdf;
-        dl = vInfo.de;
+        exPayload.d = vInfo.de;
+        exPayload.p = 0;
         
         //LightPathsIndexBuffer[LightPathsIndexBuffer.IncrementCounter()] = offset;
         //tempVertexBuffer[0] = lv;
@@ -303,12 +394,16 @@ struct PathTracer
 
         path.thp = lv.beta;
         path.pdf = dirPdf;
+/*
 
         uint vertexID = LightPathsIndexBuffer.IncrementCounter();
         uint mortonCode = GenMortonCode(path.origin);
         LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
         LightPathsVertexsBuffer[vertexID] = vInfo;
         LightPathsVertexsPositionBuffer[vertexID] = float4(path.origin, getIntensity(vInfo.beta));
+
+        exPayload.prevIndex = vertexID;
+*/
     }
 
     /** Set up path for logging and debugging.
@@ -1096,7 +1191,7 @@ struct PathTracer
         return quantPos.x * 4 + quantPos.y * 2 + quantPos.z;
     }
 
-    void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout float dl) {
+    void lightPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout ExtraPayload exPayload) {
         const bool isPrimaryHit = false;
         const HitType hitType = path.hit.getType();
         const bool isTriangleHit = hitType == HitType::Triangle;
@@ -1162,26 +1257,36 @@ struct PathTracer
         const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
         bool hasDelta = ((uint)LobeType::Delta & lobes) != 0;
-        float N = hasDelta ? 0 : 2.0;
-        pdfRev = vertex.ConvertRevDensity(path, pdfRev);
+        float N = 1;
+        pdfRev = remap0(vertex.ConvertRevDensity(path, pdfRev));
 
         VertexInfo vInfo = VertexInfo::create(path, vertex);
-        dl = (N + pdfRev * dl) / remap0(vertex.pdfFwd);
-        vInfo.de = dl;
-        //LightPathsVertexsBuffer[offset] = vInfo;
+        exPayload.d = (N + pdfRev * exPayload.d) / remap0(vertex.pdfFwd);
+        vInfo.de = exPayload.d;
+        exPayload.p = pdfRev * (1 + exPayload.p) / remap0(vertex.pdfFwd);
+        vInfo.pe = exPayload.p;
+        
+        //vInfo.prevIndex = exPayload.prevIndex;
+        // LightPathsVertexsBuffer[offset] = vInfo;
+        bool isDiffuse = bs.isLobe(LobeType::Diffuse) || (bs.isLobe(LobeType::Reflection) && (bsdfProperties.roughness > 0.5));
 
-        float3 albedo =   bsdfProperties.diffuseReflectionAlbedo 
-                        + bsdfProperties.diffuseTransmissionAlbedo 
-                        + bsdfProperties.specularReflectionAlbedo 
-                        + bsdfProperties.specularTransmissionAlbedo;
+        if (path.getVertexIndex() == 1) path.setFlag(PathFlags::isFirstNonDelta, !isDiffuse);
+        else {
+            bool isFirstNonDelta = path.hasFlag(PathFlags::isFirstNonDelta);
+            path.setFlag(PathFlags::isFirstNonDelta, isFirstNonDelta && !isDiffuse);
+        }
 
         if (!hasDelta) {
             uint vertexID = LightPathsIndexBuffer.IncrementCounter();
             uint mortonCode = GenMortonCode(vertex.sd.posW);
+
+            vInfo.setFlag(!path.hasFlag(PathFlags::isFirstNonDelta), VertexFlag::diffuseHit);
             LightPathsVertexsBuffer[vertexID] = vInfo;
             LightPathsIndexBuffer[vertexID] = uint2(vertexID, mortonCode);
             LightPathsVertexsPositionBuffer[vertexID] = float4(vertex.sd.posW, (!vertex.delta) ? getIntensity(vertex.beta) : 0);
+            
         }
+        
 
         if (isCurveHit)
         {
@@ -1219,7 +1324,7 @@ struct PathTracer
         
     }
 
-    void CameraPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout float de)
+    void CameraPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout ExtraPayload exPayload)
     {
         const bool isPrimaryHit = path.getVertexIndex() == 1;
         const uint index = path.getVertexIndex() - 1;
@@ -1267,10 +1372,12 @@ struct PathTracer
 
         // Disable specular lobes if caustics are disabled and path already contains a diffuse vertex.
         bool isSpecular = bsdfProperties.roughness <= params.specularRoughnessThreshold;
+
         if (kDisableCaustics && path.getBounces(BounceType::Diffuse) > 0 && isSpecular)
         {
             sd.mtl.setActiveLobes((uint)LobeType::Diffuse);
         }
+
 
         // Optionally disable emission inside volumes.
         if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume())
@@ -1288,22 +1395,188 @@ struct PathTracer
         float pdfRev = bsdfRev.evalPdf(sdRev, wi);
 
         bool hasDelta = (lobes & (uint)LobeType::Delta) != 0;
+        //bool isFirstNonDelta = (!exPayload.isFirstNonDelta) && (!hasDelta);
+        //exPayload.isFirstNonDelta = isFirstNonDelta;
         vertex.delta = hasDelta;
-        float N = (isPrimaryHit ? 2.f : 1.f);
+        float N = 1.f;
 
-        de = (N + de * vertex.ConvertRevDensity(path, pdfRev)) / remap0(vertex.pdfFwd);
+        float convertRevPdf = remap0(vertex.ConvertRevDensity(path, pdfRev));
 
         bool sampleUpperHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
         if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
         bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
 
-        //s >= 1
-        ConnectBDPT(path, vertex, vq, de, sampleUpperHemisphere, sampleLowerHemisphere);
+        bool onlyUsePrimary = true;//params.hasFlag(BDPTFlags::t1); // ? !exPayload.isFirstNonDelta : true;
+        bool isDiffuseHit = !hasDelta; // bs.isLobe(LobeType::Diffuse) || (bs.isLobe(LobeType::Reflection) && (bsdfProperties.roughness > 0.7));
+        bool useMerge = params.hasFlag(BDPTFlags::useVertexMerge);
 
-        // s == 1
-        // TODO:trans
-/*
-        if (false) {
+        bool isFirstNonDelta = isDiffuseHit && !path.hasFlag(PathFlags::isFirstNonDelta);
+        if (bs.isLobe(LobeType::Transmission)) path.setFlag(PathFlags::passedTransmission, true);
+        // bool isFirstNonDelta = !hasDelta && !exPayload.isFirstNonDelta;
+        if (isFirstNonDelta) path.setFlag(PathFlags::isFirstNonDelta, true);
+
+        float radius = globalRadius;
+        bool isCausticPath = false;
+
+        // vertex merge
+
+        if ((((isFirstNonDelta && onlyUsePrimary) || !onlyUsePrimary)) && useMerge) {
+
+            if (isFirstNonDelta && onlyUsePrimary) { // temporal ppm
+                uint2 pixel = path.getPixel();
+                if (params.frameCount == 0 || params.hasFlag(BDPTFlags::t1)) { // init frame
+                    radius = globalRadius;
+                    float3 avgCenter = 0;
+                    uint num = 0;
+                    float4 fluxAndNum = vertexMerge(path, vertex, exPayload.p, exPayload.d, radius, avgCenter, num, onlyUsePrimary);
+                    isCausticPath = num != 0;
+                    path.L += vertex.beta * fluxAndNum.xyz * M_1_PI / (radius * radius);
+                    OutputFluxAndNumber[pixel] = fluxAndNum;
+                    OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, radius);
+                    OutputPosAndNewRadii[pixel] = float4(vertex.sd.posW, radius);
+                    OutputIteration[pixel] = 1;
+                    
+                }
+                else { // temporal reuse
+                    uint2 imageDim = uint2(1920, 1080);
+                    float2 mv = motionVec[pixel] * float2(imageDim);
+                    int2 prevPixel = int2(float2(pixel) + 0.5f + mv);
+                    if (any(prevPixel < int2(1, 1)) || any(prevPixel > imageDim - int2(1, 1))) {
+                        float3 avgCenter = 0;
+                        radius = globalRadius;
+                        uint num = 0;
+                        float4 fluxAndNum = vertexMerge(path, vertex, exPayload.p, exPayload.d, radius, avgCenter, num, onlyUsePrimary);
+                        isCausticPath = num != 0;
+                        path.L += vertex.beta * fluxAndNum.xyz * M_1_PI / (radius * radius);
+                        OutputFluxAndNumber[pixel] = fluxAndNum;
+                        OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, radius);
+                        OutputPosAndNewRadii[pixel] = float4(vertex.sd.posW, radius);
+                        OutputIteration[pixel] = 1;
+                    }
+                    else {
+                        float3 prevNormal = InputNormalAndRadii[prevPixel].xyz;
+                        float prevRadius = InputNormalAndRadii[prevPixel].w;
+                        float3 prevPos = InputPosAndNewRadii[prevPixel].xyz;
+                        float newRadius = InputPosAndNewRadii[prevPixel].w;
+                        float3 toPrevPos = prevPos - vertex.sd.posW;
+                        float dist = length(toPrevPos);
+
+                        uint2 dxPixel = uint2((prevPixel.x + 1 < imageDim.x) ? prevPixel.x + 1 : prevPixel.x - 1, prevPixel.y);
+                        uint2 dyPixel = uint2(prevPixel.x, (prevPixel.y + 1 < imageDim.y) ? prevPixel.y + 1 : prevPixel.y - 1);
+                        float dxPos = distance(prevPos, InputPosAndNewRadii[dxPixel].xyz);
+                        float dyPos = distance(prevPos, InputPosAndNewRadii[dyPixel].xyz);
+                        float pFwidth = dxPos + dyPos;
+
+                        //float gamma = commonArea(prevRadius, newRadius, dist) * M_1_PI / (prevRadius * prevRadius);
+
+                        if ((dist < prevRadius)) {                          // valid
+                            radius = newRadius;
+                            float3 avgCenter = 0;
+                            uint num = 0;
+                            float4 fluxAndNum = vertexMerge(path, vertex, exPayload.p, exPayload.d, radius, avgCenter, num, onlyUsePrimary);
+                            isCausticPath = num != 0;
+                            float3 prevTau = InputFluxAndNumber[prevPixel].xyz;
+                            float prevN = InputFluxAndNumber[prevPixel].w;
+                            float3 phi = fluxAndNum.xyz;
+                            float M = fluxAndNum.w;
+                            if (M == 0) {
+                                if (InputIteration[prevPixel] == 0) {
+                                    OutputFluxAndNumber[pixel] = fluxAndNum;
+                                    OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, globalRadius);
+                                    OutputPosAndNewRadii[pixel] = float4(vertex.sd.posW, globalRadius);
+                                    OutputIteration[pixel] = 1;
+                                }
+                                else {
+                                    path.L += vertex.beta * prevTau * M_1_PI / (radius * radius * InputIteration[prevPixel]);
+                                    OutputFluxAndNumber[pixel] = InputFluxAndNumber[prevPixel];
+                                    OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, prevRadius);
+                                    OutputPosAndNewRadii[pixel] = float4(vertex.sd.posW, prevRadius);
+                                    OutputIteration[pixel] = InputIteration[prevPixel];
+                                }
+                            }
+                            else {
+                                float gamma = commonArea(prevRadius, newRadius, dist) * M_1_PI / (prevRadius * prevRadius);
+                                float alpha = 0.667f;
+                                float nextN = prevN + alpha * M;
+                                float reduction = nextN / (prevN + M);
+                                uint iteration = InputIteration[prevPixel] + (M > 0 ? 1 : 0);
+                                // iteration = min(iteration, 20);
+                                float3 Tau = (prevTau + phi) * reduction;
+                                // iteration = min(iteration, 20);
+                                float nextRadius = newRadius * sqrt(reduction);
+
+                                path.L += vertex.beta * Tau * M_1_PI / (nextRadius * nextRadius * iteration);
+                                //path.L = float3(getIntensity(prevTau), 0.f, getIntensity(phi));
+                                // path.L += vertex.beta * phi * M_1_PI / (radius * radius);//(nextRadius * nextRadius * iteration);
+                                // path.L += 1;
+                                OutputFluxAndNumber[pixel] = float4(Tau, nextN);
+                                OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, prevRadius);
+                                OutputPosAndNewRadii[pixel] = float4(prevPos, nextRadius);
+                                OutputIteration[pixel] = iteration;
+                            }
+                            // type1
+                            // float gamma = commonArea(prevRadius, newRadius, dist) * M_1_PI / (prevRadius * prevRadius);
+                            /*
+                            float gamma = Gaussian(dist, radius / 3);
+                            float alpha = 0.9f;
+                            uint totalNum = InputIteration[prevPixel];
+                            float reduction = (gamma * prevN + alpha * M) / (gamma * prevN + num);
+                            float3 Tau = (prevTau / prevN * gamma + phi);
+                            // float3 Tau = phi * M_1_PI / (radius * radius);
+                            float nextN = gamma * totalNum + M;
+                            avgCenter = (avgCenter * M + (prevNormal + prevPos - vertex.sd.posW) * gamma * totalNum) / nextN;
+                            float nextRadius = radius * sqrt(reduction);
+                            path.L += vertex.beta * Tau;
+                            */
+                            //type2
+                            
+
+                        }
+                        else {
+                            radius = globalRadius;
+                            float3 avgCenter = 0;
+                            uint num = 0;
+                            float4 fluxAndNum = vertexMerge(path, vertex, exPayload.p, exPayload.d, radius, avgCenter, num, onlyUsePrimary);
+                            isCausticPath = num != 0;
+                            path.L += vertex.beta * fluxAndNum.xyz * M_1_PI / (radius * radius);
+                            OutputFluxAndNumber[pixel] = fluxAndNum;
+                            OutputNormalAndRadii[pixel] = float4(vertex.sd.faceN, radius);
+                            OutputPosAndNewRadii[pixel] = float4(vertex.sd.posW, radius);
+                            OutputIteration[pixel] = 1;
+                        }
+                    }
+                }
+                exPayload.pPrim = 1.f;    
+            }
+            else {
+                radius = globalRadius;
+                float3 avgCenter = 0;
+                uint num = 0;
+                float4 fluxAndNum = vertexMerge(path, vertex, exPayload.p, exPayload.d, radius, avgCenter, num, onlyUsePrimary);
+                path.L += vertex.beta * fluxAndNum.xyz * M_1_PI / (radius * radius);
+            }
+              
+            
+        }
+        
+
+        // s >= 1
+        if (!hasDelta) {
+            RISSampleInfo risInfo = {};
+            bool validSample = ConnectBDPT(path, vertex, vq, exPayload.d, onlyUsePrimary ? exPayload.pPrim : exPayload.p, radius, isFirstNonDelta, onlyUsePrimary, isCausticPath, risInfo);
+            if (validSample) {
+                //uint aabbIndex = hitPointAABB.IncrementCounter();
+                // TODO: move outside
+                //hitPointAABB[aabbIndex] = AABB(vertex.sd.posW - globalRadius, vertex.sd.posW + globalRadius);
+                //uint2 texIndex = uint2(aabbIndex % 2048, aabbIndex / 2048);
+                //if (params.frameCount == 0) {
+                    
+                //}
+            }
+        }
+
+        if (!hasDelta)
+        { // s == 1
             bool validSample = false;
 
             // Sample a point on a light and connect it to the camera subpath
@@ -1339,19 +1612,48 @@ struct PathTracer
                 float3 weight = bsdf.eval(sd, dir, path.sg);
                 float3 Lr = vertex.beta * weight * lightVertex.beta;
 
+                ShadingData sd1 = sd;
+                float3 wo = sd1.V;
+                sd1.V = -wi;
+                const IBSDF bsdf1 = gScene.materials.getBSDF(sd1, lod);
+                float pdfRev1 = vertex.ConvertRevDensity(path, bsdf1.evalPdf(sd1, wo));
+                float de1 = (1 + remap0(pdfRev1) * exPayload.d) / remap0(vertex.pdfFwd);
+
                 if (params.hasFlag(BDPTFlags::s1) && any(Lr > 0.f))
                 {
                     // Ray ray = ls.getVisibilityRay();
                     logTraceRay(PixelStatsRayType::Visibility);
                     bool visible = vq.traceVisibilityRay(ray);
+
+                    //float radius = 0.005 * length(dimension);
+                    float pdfToX = dirPdf;
+                    pdfToX = dot(-dir, vertex.sd.N) * pdfToX / distSqr;
+                    float OmegaMC = 0;
+                    if (onlyUsePrimary) {
+                        float pe1 = isFirstNonDelta ? 1.f : exPayload.pPrim * remap0(pdfRev1) / remap0(vertex.pdfFwd);
+                        OmegaMC = M_PI * radius * radius * pe1 * pdfToX;
+                    }
+                    else {
+                        float pe1 = (1 + exPayload.p) * remap0(pdfRev1) / remap0(vertex.pdfFwd);
+
+                        float pdfFromX = bsdf.evalPdf(vertex.sd, dir) * abs(dot(dir, lightVertex.sd.N)) / distSqr;
+                        float pl = remap0(pdfFromX) / remap0(pdfToX);
+                        float OmegaMC = (pe1 + 1.f + pl) * pdfToX * M_PI * radius * radius;
+                    }
+
+                    float OmegaCC = 1 / BDPTMIS(path, lightVertex, vertex, de1);
+                    if (!params.hasFlag(BDPTFlags::useVertexMerge)) OmegaMC = 0;
+                    //OmegaMC = 0;
+                    //float OmegaMC = (pe1 + 1.f + pl) * pdfToX * M_PI * radius * radius;// * kLightPassHeight * kLightPassWidth;
+
+                    //if (params.hasFlag(BDPTFlags::t1)) OmegaMC = 0;
                     // visible = true;
-                    if (visible) path.L += Lr * BDPTMIS(path, lightVertex, vertex, de);
+                    if (visible) path.L += Lr / (OmegaCC + OmegaMC);
                 }
             }
         }
-*/      
+     
         // s == 0
-
         bool computeEmissive = kUseEmissiveLights;
         TriangleHit triangleHit = path.hit.getTriangleHit();
         TriangleLightHit hit;
@@ -1359,10 +1661,18 @@ struct PathTracer
         hit.posW = sd.posW;
         hit.normalW = sd.frontFacing ? sd.faceN : -sd.faceN;
 
+        float cosTheta0 = abs(dot(normalize(path.dir), hit.normalW));
+        float pdfRev0 = vertex.ConvertRevDensity(path, cosTheta0 * M_1_PI);
+        float de0 = (1 + pdfRev0 * exPayload.d) / remap0(vertex.pdfFwd);
+
         //bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
         if (params.hasFlag(BDPTFlags::s0) && computeEmissive && any(bsdfProperties.emission > 0.f)) {
-            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit, de);
+            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit, de0);
         }
+
+        exPayload.d = (N + exPayload.d * convertRevPdf) / remap0(vertex.pdfFwd);
+        exPayload.p = convertRevPdf * (1 + exPayload.p) / remap0(vertex.pdfFwd);
+        exPayload.pPrim = isFirstNonDelta ? 1.f : exPayload.pPrim * convertRevPdf / remap0(vertex.pdfFwd);
 
         if (isCurveHit)
         {
@@ -1386,6 +1696,239 @@ struct PathTracer
         if (isLastVertex || !valid) {
             path.terminate();
         }
+    }
+
+    /*
+    void getArrayOfCells(float3 position, out int3 outCells[8])
+    {
+        float3 cell = (position.xyz * gHashScaleFactor);
+        float radInScale = gGlobalRadius * gHashScaleFactor;
+        float3 cellFloor = floor(cell);
+        float3 relCellPos = abs(cell - cellFloor);
+        // Get offset direction
+        int3 offsetCell;
+        offsetCell.x = relCellPos.x < 0.5 ? -1 : 1;
+        offsetCell.y = relCellPos.y < 0.5 ? -1 : 1;
+        offsetCell.z = relCellPos.z < 0.5 ? -1 : 1;
+
+        // Fill the cell array
+
+        outCells[0] = int3(cellFloor);
+        outCells[1] = int3(floor(cell + radInScale * float3(offsetCell.x, 0, 0)));
+        outCells[2] = int3(floor(cell + radInScale * float3(offsetCell.x, offsetCell.y, 0)));
+        outCells[3] = int3(floor(cell + radInScale * float3(offsetCell.x, offsetCell.y, offsetCell.z)));
+        outCells[4] = int3(floor(cell + radInScale * float3(offsetCell.x, 0, offsetCell.z)));
+        outCells[5] = int3(floor(cell + radInScale * float3(0, offsetCell.y, 0)));
+        outCells[6] = int3(floor(cell + radInScale * float3(0, offsetCell.y, offsetCell.z)));
+        outCells[7] = int3(floor(cell + radInScale * float3(0, 0, offsetCell.z)));
+    }
+    */
+    inline float commonArea(float r1, float r2, float d) {
+        if (d >= r1 + r2) return 0;
+        if (r1 > r2) {
+            float tmp = r1;
+            r1 = r2;
+            r2 = tmp;
+        }
+        if (r2 - r1 >= d) return M_PI * r1 * r1;
+        float ang1 = acos((r1 * r1 + d * d - r2 * r2) / (2 * r1 * d));
+        float ang2 = acos((r2 * r2 + d * d - r1 * r1) / (2 * r2 * d));
+        return ang1 * r1 * r1 + ang2 * r2 * r2 - r1 * d * sin(ang1);
+    }
+
+    float Gaussian(float r, float sigma) {
+        //float M_1_SQRT2PI = 1.772453850905516f;
+        return exp(-r * r * 0.5 / (sigma * sigma)) * M_1_2PI / (sigma * sigma);
+    }
+
+
+    float4 vertexMerge(inout PathState path, const Vertex v, in float pe, in float de, in float radius, out float3 avgCenter, out uint num, bool onlyUsePrimary) {
+        const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+
+        let lod = createTextureSampler(path, false, isTriangleHit);
+
+        const IBSDF bsdf = gScene.materials.getBSDF(v.sd, lod);
+
+        //float radius = 0.005 * length(dimension); // TODO: User-defined parameters
+
+        // searchTheTree(1, v.sd.posW, v.sd.faceN, r, sampleNext1D(path.sg), ret);
+        Stack stack = {};
+        //Stack result = {};
+        // Stack ret = {};
+        stack.push(1);
+        uint nid = 0;
+
+        float3 f = 0;
+        float3 center = 0;
+        float weight = 0;
+        uint stopLevel = 1 << 3;
+        uint count = 0;
+        //path.L += 1;
+        while (stack.pop(nid)) {
+            Node node = nodes[nid];
+
+            if (isAABBIntersectSphere(node.boundMin, node.boundMax, v.sd.posW, v.sd.faceN, radius)) {
+                if (nid >= leafNodeStart / stopLevel) { // is leaf
+                    for (uint i = 0; i < stopLevel; ++i) {
+                        Node n = nodes[nid * stopLevel + i];
+                        if (n.ID == 0xffffffff) break;
+                        float3 fromTarget = LightPathsVertexsPositionBuffer[n.ID].xyz - v.sd.posW;
+                        float r = length(fromTarget);
+                        float cosTheta = abs(dot(fromTarget, v.sd.faceN) / r);
+                        if (r < radius && cosTheta < 0.02f) {
+                            
+                            VertexInfo vInfo = LightPathsVertexsBuffer[n.ID];
+                            if (vInfo.isLight()/* || vInfo.isCausticHit()*/) continue;
+                            count++;
+                            float3 wo = normalize(-vInfo.dir);
+                            float cosTheta1 = abs(dot(v.sd.N, wo));
+
+                            float dl = vInfo.de;
+                            ShadingData sd1 = v.sd;
+                            float3 woRev = sd1.V;
+                            sd1.V = wo;
+                            float pdfRev1 = v.ConvertRevDensity(path, bsdf.evalPdf(sd1, woRev));
+                            float de1 = (1 + pdfRev1 * de) / remap0(v.pdfFwd);
+                            float3 toSample = vInfo.origin - v.sd.posW;
+                            float dist2 = dot(toSample, toSample);
+                            float pdfFwd = bsdf.evalPdf(v.sd, wo) * abs(dot(toSample / sqrt(dist2), vInfo.originN)) / dist2;
+
+                            float omegaCM = (de1 * remap0(vInfo.pdfFwd) + 1 + dl * pdfFwd) * M_1_PI / (radius * radius * remap0(vInfo.pdfFwd));
+
+                            float pe1 = pdfRev1 * (1 + pe) / remap0(v.pdfFwd);
+                            float pl1 = pdfFwd * (1 + vInfo.pe) / remap0(vInfo.pdfFwd);
+                            float omegaMM = (onlyUsePrimary ? 1.f : (pe1 + 1 + pl1)) * (kLightPassHeight * kLightPassWidth);
+                            //if (params.hasFlag(BDPTFlags::t1)) omegaCM = 0;
+                            float MISweight = 1.f / (omegaCM + omegaMM);
+
+                            float w = Gaussian(r, radius / 3);
+                            float relRadius = r / radius;
+                            // w = 4.75f * (1.f - (1.f - exp(-4.5f * relRadius * relRadius)) / (1.f - exp(-4.5f)));
+                            // w = 0.918 * (1.f - (1.f - exp(-1.953f * 0.5f * relRadius * relRadius)) / (1.f - exp(-1.953f)));
+                            w = 1.f;//3 * (1 - relRadius);
+                            f += bsdf.eval(v.sd, wo, path.sg) * vInfo.beta * MISweight * w;
+                            center += fromTarget * w;
+                            weight += w;
+                        }
+                    }
+                }
+                else {
+                    stack.push(2 * nid + 1);
+                    stack.push(2 * nid);
+                }
+            }
+        }
+        // if (count > 0) f /= count;
+        //path.L += f * M_1_PI / (radius * radius);
+        avgCenter = center / weight;
+        num = count;
+        return float4(f, count);
+    }
+
+    struct Stack {
+        uint s[30];
+        int top = 0;
+
+        [mutating] bool push(uint a) {
+            if (top >= 29) return false;
+            top++;
+            s[top] = a;
+            return true;
+        }
+
+        [mutating] bool pop(out uint result) {
+            result = 0;
+            if (top <= 0) return false;
+            result = s[top];
+            top--;
+            return true;
+        }
+    }
+
+    bool searchTheTree(uint startId, float3 targePos, float3 targetN, float radius, float rnd, out Stack ret) {
+        Stack stack = {};
+        Stack result = {};
+        //Stack ret = {};
+        stack.push(startId);
+        uint nid = 0;
+
+        uint stopLevel = 1 << 3;
+        uint count = 0;
+
+
+        // TODO: time consuming
+        while (stack.pop(nid)) {
+            Node node = nodes[nid];
+            
+            if (isAABBIntersectSphere(node.boundMin, node.boundMax, targePos, targetN, radius)) {
+                if (nid >= leafNodeStart / stopLevel) { // is leaf
+                    result.push(nid);
+                }
+                else {
+                    stack.push(2 * nid + 1);
+                    stack.push(2 * nid);
+                }
+            }
+        }
+        uint offset = min(uint(stopLevel * rnd), stopLevel - 1);
+        float maxR = 0;
+        while (result.pop(nid)) {
+
+            for (uint i = 0; i < stopLevel; ++i) {
+                Node node = nodes[nid * stopLevel + i];
+                if (node.ID == 0xffffffff) break;
+                float3 fromTarget = LightPathsVertexsPositionBuffer[node.ID].xyz - targePos;
+                float r = length(fromTarget);
+                float cosTheta = abs(dot(fromTarget, targetN) / r);
+                if (r <= radius && cosTheta < 0.05) {
+                    count++;
+                    ret.push(node.ID);
+                }
+            }
+            
+        }
+        return count > 0;
+    }
+
+    bool isAABBIntersectSphere(float3 boundMin, float3 boundMax, float3 center, float3 targetN, float radius) {
+        //return all(center >= boundMin) && all(center <= boundMin);
+
+        float3 rMin = center - radius;
+        float3 rMax = center + radius;
+        float xOver = calOver(rMin.x, rMax.x, boundMin.x, boundMax.x);
+        float yOver = calOver(rMin.y, rMax.y, boundMin.y, boundMax.y);
+        float zOver = calOver(rMin.z, rMax.z, boundMin.z, boundMax.z);
+        bool isIntersect = xOver > 0 && yOver > 0 && zOver > 0;
+        if (!isIntersect) return false;
+        int signCount = 0;
+        float3 bMin = boundMin - center;
+        float3 bMax = boundMax - center;
+        float3 a = float3(bMin.x, bMin.y, bMax.z);
+        float3 b = float3(bMin.x, bMax.y, bMin.z);
+        float3 c = float3(bMax.x, bMin.y, bMin.z);
+        float3 d = float3(bMin.x, bMax.y, bMax.z);
+        float3 e = float3(bMax.x, bMin.y, bMax.z);
+        float3 f = float3(bMax.x, bMax.y, bMin.z);
+        signCount += sign(dot(a, targetN)) + sign(dot(b, targetN)) + sign(dot(c, targetN)) + sign(dot(d, targetN)) + sign(dot(e, targetN)) + sign(dot(f, targetN))
+                    + sign(dot(bMin, targetN)) + sign(dot(bMax, targetN));
+        if (signCount < 8 && signCount > -8) return true;
+        return false;
+    }
+
+    float calOver(float aMin, float aMax, float bMin, float bMax) {
+        float minMax = 0;
+        float maxMin = 0;
+        if (aMax < bMax) {
+            minMax = aMax;
+            maxMin = bMin;
+        }
+        else {
+            minMax = bMax;
+            maxMin = aMin;
+        }
+        return minMax - maxMin;
     }
 
 /*
@@ -1429,51 +1972,7 @@ struct PathTracer
 
         const uint lobes0 = bsdf0.getLobes(cameraPathEnd.sd);
         const uint lobes1 = bsdf1.getLobes(sample.sd);
-        /*
-                bool sampleUpperHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaReflection) != 0);
-                if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere_cameraSide = false;
-                bool sampleLowerHemisphere_cameraSide = ((lobes0 & (uint)LobeType::NonDeltaTransmission) != 0);
-                float cosTheta_cameraSide = dot(cameraPathEnd.sd.N, toSample);
-                // Flip the face normal to point in the same hemisphere as the shading normal.
-                float3 faceNormal_cameraSide = sign(dot(cameraPathEnd.sd.N, cameraPathEnd.sd.faceN)) * cameraPathEnd.sd.faceN;
-                float cosThetaFace_cameraSide = dot(faceNormal_cameraSide, toSample);
-                if (!sampleUpperHemisphere_cameraSide && (max(cosTheta_cameraSide, cosThetaFace_cameraSide) >= -kMinCosTheta)) return 0;
-                if (!sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta)) return 0;
-
-                bool sampleUpperHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaReflection) != 0);
-                bool sampleLowerHemisphere_lightSide = ((lobes1 & (uint)LobeType::NonDeltaTransmission) != 0);
-                float cosTheta_lightSide = dot(sample.sd.N, -toSample);
-                // Flip the face normal to point in the same hemisphere as the shading normal.
-                float3 faceNormal_lightSide = sign(dot(sample.sd.N, sample.sd.faceN)) * sample.sd.faceN;
-                float cosThetaFace_lightSide = dot(faceNormal_lightSide, -toSample);
-                if (!sampleUpperHemisphere_lightSide && (max(cosTheta_lightSide, cosThetaFace_lightSide) >= -kMinCosTheta)) return 0;
-                if (!sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta)) return 0;
-
-                bool cameraSideTrans = sampleLowerHemisphere_cameraSide && (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta);
-                bool lightSideTrans = sampleLowerHemisphere_lightSide && (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta);
-                bool sameMaterial = cameraPathEnd.sd.materialID == sample.sd.materialID;
-
-                if (cameraSideTrans) {
-                    const uint materialID = cameraPathEnd.sd.materialID;
-                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-                }
-                else if (lightSideTrans) {
-                    const uint materialID = sample.sd.materialID;
-                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-                }
-                if (sampleLowerHemisphere_lightSide &&
-                    (min(cosTheta_lightSide, cosThetaFace_lightSide) <= kMinCosTheta) &&
-                    sampleLowerHemisphere_cameraSide &&
-                    (min(cosTheta_cameraSide, cosThetaFace_cameraSide) <= kMinCosTheta) &&
-                    cameraPathEnd.sd.materialID == sample.sd.materialID)
-                {
-                    const uint materialID = cameraPathEnd.sd.materialID;
-                    const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
-                    result *= HomogeneousVolumeSampler::evalTransmittance(hvd, length(cameraPathEnd.sd.posW - sample.sd.posW));
-                }
-        */
+        
         result *= fr0 ? bsdf0.eval(cameraPathEnd.sd, toSample, path.sg) : 1;
         //f *= bsdf0.eval(cameraPathEnd.sd, toSample, path.sg);
         result *= fr1 ? bsdf1.eval(sample.sd, -toSample, path.sg) : 1;
@@ -1551,7 +2050,7 @@ struct PathTracer
         float3 c1_boundMax = c1.boundMax;
 
         float3 p = v.sd.posW;
-/*
+        /*
         float3 center0 = (c0_boundMin + c0_boundMax) / 2;
         float3 center1 = (c1_boundMin + c1_boundMax) / 2;
         float3 wo0 = center0 - p;
@@ -1568,7 +2067,7 @@ struct PathTracer
             c0_intensity *= getIntensity(bsdf.eval(v.sd, wo0, path.sg));
             c1_intensity *= getIntensity(bsdf.eval(v.sd, wo1, path.sg));
         }
-*/
+        */
 
         float intensGeom0 = c0_intensity; // / getSolidAngle(v.sd.posW, c0_boundMin, c0_boundMax);
         float intensGeom1 = c1_intensity;// / getSolidAngle(v.sd.posW, c1_boundMin, c1_boundMax);
@@ -1706,7 +2205,179 @@ struct PathTracer
         return endPoint;
     }
 
-    void ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in float de, in bool sampleUpper, in bool sampleLower){
+    uint inverseSample(uint y, float rnd) {
+        float totalWeight = weightSum[y];
+        if (totalWeight == 0) return 1 << kLogSize;
+
+        float weight = rnd * totalWeight;
+        uint begin = 0;
+        uint end = 1 << kLogSize - 1;
+
+        if (weight > prefixSum[uint2(end, y)]) return end;
+
+        while (end - begin > 1) {
+            uint mid = (begin + end) / 2;
+            float cdf = prefixSum[uint2(mid, y)];
+            float pmf = asfloat(prevSubspaceWeight[uint2(mid, y)]);
+            if (cdf < weight) {
+                begin = mid;
+            }
+            else if (cdf > weight) {
+                end = mid;
+            }
+            else if (pmf == 0) {
+                end = mid;
+            }
+            else {
+                begin = mid;
+                break;
+            }
+        }
+        assert(asfloat(prevSubspaceWeight[uint2(begin, y)]) != 0);
+        return begin;
+    }
+
+    uint2 sampleLightVertex(uint subspaceKey){
+        uint begin = 0;
+        uint end = counter - 1;
+        uint sampleMortonCode = subspaceKey << 20;
+        if (sampleMortonCode >= LightPathsIndexBuffer[end].y) return end;
+        if (sampleMortonCode <= LightPathsIndexBuffer[begin].y) return begin;
+        while ((end - begin) > 1) {
+            uint mid = (begin + end) / 2;
+            uint mortonCode = LightPathsIndexBuffer[mid].y;
+            if (mortonCode < sampleMortonCode) {
+                begin = mid;
+            }
+            else if (mortonCode > sampleMortonCode) {
+                end = mid;
+            }
+            else {
+                end = mid;
+                begin = mid;
+                break;
+            }
+        }
+        assert(end >= begin);
+        return uint2(begin, end);
+    }
+
+    float getAverageWeight(uint2 mortonCodeRange, uint y, out bool deadBranch) {
+        uint2 mortonIndex = mortonCodeRange >> (30u - kLogSize);
+        uint groupSize = 1 << kLogSize;
+        float weight = (mortonIndex.y < groupSize - 1) ? (prefixSum[uint2(mortonIndex.y + 1, y)] - prefixSum[uint2(mortonIndex.x, y)]) : (weightSum[y] - prefixSum[uint2(mortonIndex.x, y)]);
+        uint count = (mortonIndex.y < groupSize - 1) ? (prefixSumOfCount[uint2(mortonIndex.y + 1, y)] - prefixSumOfCount[uint2(mortonIndex.x, y)]) : (countSum[y] - prefixSumOfCount[uint2(mortonIndex.x, y)]);
+        if (count == 0) {
+            //deadBranch = true;
+            return 0;
+        }
+        else {
+            deadBranch = false;
+            return weight / count;
+        }
+        
+    }
+
+    float getSecondaryMoment(uint2 mortonCodeRange, uint y) {
+        uint2 mortonIndex = mortonCodeRange >> (30u - kLogSize);
+        uint groupSize = 1 << kLogSize;
+        float secondaryMoment = (mortonIndex.y < groupSize - 1) ? (prefixSumOfSecondaryMoment[uint2(mortonIndex.y + 1, y)] - prefixSumOfSecondaryMoment[uint2(mortonIndex.x, y)]) : (secondaryMomentSum[y] - prefixSumOfSecondaryMoment[uint2(mortonIndex.x, y)]);
+        uint count = (mortonIndex.y < groupSize - 1) ? (prefixSumOfCount[uint2(mortonIndex.y + 1, y)] - prefixSumOfCount[uint2(mortonIndex.x, y)]) : (countSum[y] - prefixSumOfCount[uint2(mortonIndex.x, y)]);
+        return (count == 0) ? FLT_MAX : secondaryMoment / count;
+    }
+
+    // https://graphics.stanford.edu/~seander/bithacks.html#IntegerLog
+    inline uint uintLog2(uint v)
+    {
+        uint r; // result of log2(v) will go here
+        uint shift;
+        r = (v > (uint)0xFFFF) ? 1 << 4 : 0;
+        v >>= r;
+        shift = (v > (uint)0xFF) ? 1 << 3 : 0;
+        v >>= shift;
+        r |= shift;
+        shift = (v > (uint)0xF) ? 1 << 2 : 0;
+        v >>= shift;
+        r |= shift;
+        shift = (v > (uint)0x3) ? 1 << 1 : 0;
+        v >>= shift;
+        r |= shift;
+        r |= (v >> 1);
+        return r;
+    }
+
+    bool sampleThroughTheTree(uint nid, float rnd, uint y, out float p, out uint sampleIndex) {
+        if (weightSum[y] == 0 || countSum[y] == 0) {
+            return true;
+        }
+        
+        float prob = 1.f;
+        bool deadBranch = false;
+        while (nid < leafNodeStart)
+        {
+            uint c0_id = nid << 1;
+            uint c1_id = c0_id + 1;
+
+            Node leftChild = nodes[c0_id];
+            Node rightChild = nodes[c1_id];
+            float prob0;
+
+            float leftAverage = getAverageWeight(leftChild.mortonRange, y, deadBranch);
+            float leftWeight = leftAverage * leftChild.betaSum;
+            float rightAverage = getAverageWeight(rightChild.mortonRange, y, deadBranch);
+            float rightWeight = rightAverage * rightChild.betaSum;
+            //if (deadBranch) return deadBranch;
+
+            //float localP = 0;
+            if (leftWeight == 0) {
+                if (rightWeight == 0) {
+                    deadBranch = true;
+                }
+                else {
+                    prob0 = 0;
+                }
+            }
+            else if (rightWeight == 0) {
+                prob0 = 1;
+            }
+            else {
+                prob0 = leftWeight / (leftWeight + rightWeight);
+            }
+
+            if (!deadBranch)
+            {
+                nid = (rnd < prob0) ? c0_id : c1_id;
+                prob *= (rnd < prob0) ? prob0 : (1 - prob0);
+                rnd = (rnd < prob0) ? rnd / prob0 : (rnd - prob0) / (1 - prob0);
+                float expection = (rnd < prob0) ? leftAverage : rightAverage;
+                float secondaryMoment = getSecondaryMoment((rnd < prob0) ? leftChild.mortonRange : rightChild.mortonRange, y);
+                float variance = secondaryMoment - expection * expection;
+                if (variance < maxVariance[y] * 0.2f) {
+                    uint level = uintLog2(leafNodeStart) - uintLog2(nid);
+                    uint start = nid << level;
+                    uint childCount = 1 << level;
+                    uint end = min(start + childCount, leafNodeStart + counter);
+                    uint realCount = end - start;
+                    uint sampleLeaveNodeID = start + min(uint(rnd * realCount), realCount - 1);
+                    sampleIndex = nodes[sampleLeaveNodeID].ID;
+                    p = prob / realCount;
+                    return false;
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        if (!deadBranch) {
+            sampleIndex = nodes[nid].ID;
+            p = prob;
+        }
+        return deadBranch;
+    }
+
+    bool ConnectBDPT<VisibilityQuery : IVisibilityQuery>(inout PathState path, const Vertex v, inout VisibilityQuery vq, in float de, in float pe, in float radius, in bool isFirstNonDelta, in bool onlyUsePrimary, in bool isCausticPath, out RISSampleInfo risInfo){
         // select several valid vertex from the light path
 
         const bool isPrimaryHit = path.getVertexIndex() == 1;
@@ -1716,79 +2387,264 @@ struct PathTracer
         let lod = createTextureSampler(path, false, isTriangleHit);
 
         const IBSDF bsdf = gScene.materials.getBSDF(v.sd, lod);
+        uint sampleIndex = 0;
+        uint vertexMorton = GenMortonCode(v.sd.posW);
+        uint yMorton = vertexMorton >> (30u - kLogSize);
+        float one_over_prob = 1.f;
+        float prob = 1.f;
+        float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
+        if (params.hasFlag(BDPTFlags::useSubspaceBDPT)) {
 
-        double nprob = 1.0;
-        float r = sampleNext1D(path.sg);
-        uint nid = 1;
-
-        bool deadBranch = selectVertex(nid, r, nprob, path, v, bsdf, sampleUpper, sampleLower);
-
-        float one_over_prob = (nprob == 0.0) ? 0.0 : 1.0 / float(nprob);
-
-        if (deadBranch) return;
-        
-        if (params.hasFlag(BDPTFlags::t1)) {
             
-            nid = min(uint(counter * sampleNext1D(path.sg)), counter - 1) + leafNodeStart;
-            one_over_prob = counter;
+            bool deadBranch = sampleThroughTheTree(1, sampleNext1D(path.sg), yMorton, prob, sampleIndex);
+            //bool deadBranch = true;
+            if (deadBranch) {
+                sampleIndex = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+                one_over_prob = counter * inv_M;
+            }
+            else {
+                assert(prob <= 1.f);
+                one_over_prob = 1.f / prob * inv_M;
+                //if (one_over_prob < 1.f) one_over_prob = 100.f;
+                //one_over_prob = 10.f;
+            }
+
+            /*
+            uint subspaceKey = inverseSample(yMorton, sampleNext1D(path.sg));
+            if (subspaceKey >= (1 << kLogSize)) {
+                sampleIndex = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+                //one_over_prob = 1000000;
+                one_over_prob = counter * inv_M;
+            }
+            else {
+                uint2 begin = sampleLightVertex(subspaceKey);
+                uint2 end = sampleLightVertex(subspaceKey + 1);
+                sampleIndex = begin.y + min(uint((end.x - begin.y + 1) * sampleNext1D(path.sg)), end.x - begin.y);
+                if (begin.y > end.x) one_over_prob = 1000000000;
+                else one_over_prob = weightSum[yMorton] / asfloat(prevSubspaceWeight[uint2(subspaceKey, yMorton)]) * (end.x - begin.y + 1) * inv_M;// * float(kLightPassHeight * kLightPassWidth);
+            }
+            */
+        }
+        else {
+            sampleIndex = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+            one_over_prob = counter * inv_M;
         }
         
-        Node sampleNode = nodes[nid];
-        uint sampleIndex = sampleNode.ID;
+
+        //uint nodeID = sampleIndex + leafNodeStart;
+        //sampleIndex = nodes[nodeID].ID;
 
         VertexInfo sampleInfo = LightPathsVertexsBuffer[sampleIndex];
 
         // one_over_prob *= sampleNode.betaSum / getIntensity(sampleInfo.beta);
         //one_over_prob /= sampleNode.pdf;
 
-        float3 f;
+        float3 f = 0;
+        float3 qStar = 0;
         Ray ray;
+
+        ShadingData sd2 = v.sd;
+        float3 wo = sd2.V;
+        bool visible = false;
+        
+        // float radius = 0.005 * length(dimension);
+        float3 samplePos = 0;
 
         if (sampleInfo.isLight()) {
             // light
+            samplePos = sampleInfo.origin;
             float3 toSample = sampleInfo.origin - v.sd.posW;
             float dist2 = dot(toSample, toSample);
             toSample /= sqrt(dist2);
 
             const uint lobes = bsdf.getLobes(v.sd);
 
-            float g = dot(normalize(sampleInfo.dir), -toSample) / dist2;
+            float g = max(dot(normalize(sampleInfo.dir), -toSample) / dist2, 0);
 
             ray = getVisibiliyTestRay(v, sampleInfo);
 
-            f = bsdf.eval(v.sd, toSample, path.sg) * g * sampleInfo.beta * BDPTMIS(path, sampleInfo, v, de);
+            sd2.V = toSample;
+            const IBSDF bsdf2 = gScene.materials.getBSDF(sd2, lod);
+            float pdfRev2 = v.ConvertRevDensity(path, bsdf2.evalPdf(sd2, wo));
+            float de2 = (1 + remap0(pdfRev2) * de) / remap0(v.pdfFwd);
+
+            float pdfToX = abs(dot(toSample, sampleInfo.dir)) * M_1_PI;
+            pdfToX = dot(-toSample, v.sd.N) * pdfToX / dist2;
+
+            float OmegaMC = 0;
+            if (onlyUsePrimary) {
+                float pe2 = isFirstNonDelta ? 1.f : pe * pdfRev2 / remap0(v.pdfFwd);
+                OmegaMC = M_PI * radius * radius * pe2 * pdfToX;
+            }
+            else {
+                float pe2 = (1 + pe) * remap0(pdfRev2) / remap0(v.pdfFwd);
+                
+                float pdfFromX = bsdf.evalPdf(v.sd, toSample) * g / dist2;
+                float pl = remap0(pdfFromX) / remap0(pdfToX);
+                OmegaMC = (pe2 + 1.f + pl) * pdfToX * M_PI * radius * radius * (kLightPassHeight * kLightPassWidth);// * (kLightPassHeight * kLightPassWidth);
+            }
+
+            if (!isCausticPath) OmegaMC = 0;
+
+            float OmegaCC = 1 / BDPTMIS(path, sampleInfo, v, de2);
+            visible = vq.traceVisibilityRay(ray);
+            //f = bsdf.eval(v.sd, toSample, path.sg) * g * sampleInfo.beta * BDPTMIS(path, sampleInfo, v, de2);
+            //path.L += (visible) ? inv_M * v.beta * f * counter : 0;
         }
         else
         {
             // others
             Vertex sample = LightPathsVertexsBuffer[sampleIndex].unpack(false);
-/*
-            uint start = max(nid - 5, leafNodeStart);
-            uint end = min(nid + 5, 2 * leafNodeStart - 1);
-            uint filterCounter = 0;
-            float3 accumulativeBeta = 0;
-
-            for (; start + filterCounter <= end; ++filterCounter) {
-                uint neignborNodeId = start + filterCounter;
-                uint neighborIndex = nodes[neignborNodeId].ID;
-                accumulativeBeta += LightPathsVertexsBuffer[neighborIndex].beta;
-            }
-*/
+            samplePos = sample.sd.posW;
             // float3 result_q = RISWeight(v, sample, path, false);
             ray = getVisibiliyTestRay(v, sample);
 
-            //float3 meanBeta = accumulativeBeta;
+            sd2.V = sample.sd.posW - v.sd.posW;
+            float dist2 = dot(sd2.V, sd2.V);
 
-            f = RISWeight(v, sample, path, sample.beta) * BDPTMIS(path, sampleIndex, v, de);
+            float3 toSample = sd2.V / sqrt(dist2);
+            const IBSDF sampleBsdf = gScene.materials.getBSDF(sample.sd, lod);
+            float pdfToX = sampleBsdf.evalPdf(sample.sd, -toSample);
+            pdfToX = dot(toSample, v.sd.N) * pdfToX / dist2;
+
+            qStar = sampleBsdf.eval(sample.sd, -toSample, path.sg) * sample.beta * G(sample, v);
+
+            float3 mergeSamplePos = samplePos;
+            float3 mergeSampleNormal = 0;
+            float3 mergeRadiance = qStar;
+            float mergeDL = sampleInfo.de;
+            float mergeP_toLeft = pdfToX;
+            float mergeW = 1.f;
+            if (params.hasFlag(BDPTFlags::useReservoir)) {
+                uint2 pixel = path.getPixel();
+                uint threadSymbol = (pixel.y * 1920 + pixel.x) * kMaxSurfaceBounces + path.getVertexIndex() - 1;
+                uint hash = vertexMorton >> 10;
+                uint2 addr = uint2(hash % (1 << kLogSize), hash / (1 << kLogSize));
+                float rnd = sampleNext1D(path.sg);
+                uint outSymbol = 0;
+                myLock(ReservoirSignal, addr, threadSymbol);
+                /*
+                RWTexture2D<uint2> Reservoir;       // x := W (float), y := sample count(uint)
+                RWTexture2D<float4> samplePosition; // xyz := pos, w := dL
+                RWTexture2D<float4> hitPointPosition; // xyz := pos,
+                RWTexture2D<float4> normal;          // xyz := sample normal
+                RWTexture2D<float4> radiance;        // rgb := radiance, a := p_toLeft
+                ndir_to_oct_equal_area_unorm
+                */
+                uint2 localReservoir = Reservoir[addr];
+                float weight = visible ? getIntensity(qStar) : 0;
+                if (asfloat(localReservoir.x) + weight != 0) {
+                    float3 reservoirRadiance = radiance[addr].xyz;
+                    // float j = Jacobian(hitPointPosition[addr].xyz, v.sd.posW, samplePosition[addr].xyz, normal[addr].xyz);
+                    float j = 1;
+                    uint count = min(localReservoir.y, 100);
+                    float reservoirWeight = getIntensity(reservoirRadiance);
+                    float totalWeight = asfloat(localReservoir.x) * count * reservoirWeight * j + weight;
+                    mergeW = totalWeight / (count + 1) / weight;
+                    Reservoir[addr] = uint2(asuint(mergeW), count + 1);
+                    if (rnd < weight / totalWeight) {
+                        samplePosition[addr] = float4(samplePos, sampleInfo.de);
+                        radiance[addr] = float4(qStar, pdfToX);
+                    }
+                    else {
+                        mergeSamplePos = samplePosition[addr].xyz;
+                        mergeDL = samplePosition[addr].w;
+                        mergeRadiance = radiance[addr].rgb;
+                        mergeP_toLeft = radiance[addr].w;
+                    }
+                }
+                uint tmpID = myUnlock(ReservoirSignal, addr);
+                assert(tmpID == threadSymbol);
+            }
+
+            sd2.V = mergeSamplePos - v.sd.posW;
+            if (dot(sd2.V, sd2.N) <= 0) {
+                visible = false;
+            }
+            else {
+                dist2 = dot(sd2.V, sd2.V);
+                toSample = sd2.V / sqrt(dist2);
+                const IBSDF bsdf2 = gScene.materials.getBSDF(sd2, lod);
+                float pdfRev2 = v.ConvertRevDensity(path, bsdf2.evalPdf(sd2, wo));
+                float de2 = (1 + remap0(pdfRev2) * de) / remap0(v.pdfFwd);
+
+                float pdfFromX = bsdf.evalPdf(v.sd, toSample) * abs(dot(toSample, sample.sd.N)) / dist2;
+
+                float OmegaMC = 0;
+                if (onlyUsePrimary) {
+                    float pe2 = isFirstNonDelta ? 1.f : pe * pdfRev2 / remap0(v.pdfFwd);
+                    OmegaMC = M_PI * radius * radius * pe2 * pdfToX;
+                }
+                else {
+                    float pe2 = (1 + pe) * remap0(pdfRev2) / remap0(v.pdfFwd);
+                    
+                    float pl = (1 + sampleInfo.pe) * pdfFromX / remap0(pdfToX);
+                    OmegaMC = (pe2 + 1.f + pl) * pdfToX * M_PI * radius * radius;
+                }
+
+                ShadingData sampleSd2 = sample.sd;
+                float3 woSampleRev = sampleSd2.V;
+                sampleSd2.V = -sd2.V;
+                float pdfSampleRev = sampleBsdf.evalPdf(sampleSd2, woSampleRev);
+                float distance = length(sampleInfo.origin - sample.sd.posW);
+                pdfSampleRev *= abs(dot(normalize(woSampleRev), sampleInfo.originN)) / distance;
+
+                // float pl = (1 + sampleInfo.pe) * pdfSampleRev / remap0(sampleInfo.pdfFwd);
+
+                if (!isCausticPath || !params.hasFlag(BDPTFlags::useVertexMerge)) OmegaMC = 0;
+                float OmegaCC = de2 * mergeP_toLeft + 1 + mergeDL * pdfFromX; //1 / BDPTMIS(path, sampleIndex, v, de2); // * kLightPassHeight * kLightPassWidth;
+
+                // float OmegaMC = (pe2 + 1.f + pl) * pdfToX * M_PI * radius * radius;// * (kLightPassHeight * kLightPassWidth);// * (kLightPassHeight * kLightPassWidth);
+
+                f = bsdf.eval(v.sd, toSample, path.sg) * mergeRadiance * mergeW / (OmegaMC + OmegaCC);
+                visible = vq.traceVisibilityRay(ray);
+                if (!params.hasFlag(BDPTFlags::useVertexMerge)) {
+                    // if (params.hasFlag())
+                    f *= one_over_prob;
+                    // f = prob;
+                }
+            }
+            
+            
+            //path.L += (visible) ? inv_M * v.beta * f * counter : 0;
+            //f = RISWeight(v, sample, path, sample.beta) / (OmegaCC + OmegaMC);
         }
 
-        bool visible =vq.traceVisibilityRay(ray);
+        
 
-        float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
+        path.L += (params.hasFlag(BDPTFlags::s2) && visible) ? v.beta * f : 0;
 
-        path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? inv_M * v.beta * f * one_over_prob : 0;
-        //path.L += (params.hasFlag(BDPTFlags::s2) && !deadBranch && visible) ? v.beta * f : 0;
+        uint xMorton = GenMortonCode(samplePos) >> (30u - kLogSize);
+        
+        uint2 subspaceIndex = uint2(xMorton, yMorton);
+        if (visible) {
+            float weight = getIntensity(qStar);
+            float secondaryMoment = weight * weight;
+            InterlockedAddFloat(SubspaceWeight, subspaceIndex, weight);
+            InterlockedAddFloat(SubspaceSecondaryMoment, subspaceIndex, secondaryMoment);
+        }
+        //InterlockedAddFloat(SubspaceWeight, subspaceIndex, getIntensity(qStar));
+        InterlockedAdd(SubspaceCount[subspaceIndex], 1);
+
+        return getIntensity(qStar) > 0.01f;
+
+
+        //if (all(qStar < 0.01f)) return false;
+
+        //path.L += (params.hasFlag(BDPTFlags::s2) && visible) ? inv_M * v.beta * f * counter : 0;
+        //return true;
+        
         //path.L += inv_M * f * one_over_prob;
+    }
+
+    float Jacobian(float3 x1r, float3 x1q, float3 x2q, float3 normal) {
+        float3 x1qToX2q = x2q - x1q;
+        float3 x1rToX2q = x2q - x1r;
+        float length1 = sqrt(dot(x1qToX2q, x1qToX2q));
+        float length2 = sqrt(dot(x1rToX2q, x1rToX2q));
+        float cosPhiR = abs(dot(x1rToX2q, normal) / length2);
+        float cosPhiQ = abs(dot(x1qToX2q, normal) / length1);
+        return cosPhiR / cosPhiQ * length1 / length2;
     }
 
     float BDPTMIS(PathState path, uint sampleIndex, Vertex v, float de) {
@@ -1800,6 +2656,7 @@ struct PathTracer
 
         VertexInfo sampleInfo = LightPathsVertexsBuffer[sampleIndex];
         float dl = sampleInfo.de;
+
         Vertex qs = sampleInfo.unpack(false);
         Vertex pt = v;
 
@@ -1810,7 +2667,15 @@ struct PathTracer
         const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
         float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wo), qs);
 
-        float N = isPrimaryHit ? 2.0 : 1.0;
+        ShadingData sdRev = qs.sd;
+        float3 woRev = sdRev.V;
+        sdRev.V = pt.sd.posW - qs.sd.posW;
+        float3 toOrigin = sampleInfo.origin - qs.sd.posW;
+        float dist2 = dot(toOrigin, toOrigin);
+        float pdfRev_qs = bsdf1.evalPdf(sdRev, woRev) * abs(dot(toOrigin / sqrt(dist2), sampleInfo.originN)) / dist2;
+        //dl = (1 + pdfRev_qs * dl) / remap0(sampleInfo.pdfFwd);
+        //dl = 0;
+        float N = 1.0;
 
         return 1.f / (de * pdfRev + N + dl * pdfFwd);
     }
@@ -1839,7 +2704,7 @@ struct PathTracer
         const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
         float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wi), lightVertexInfo.origin, lightVertexInfo.dir);
 
-        return 1.f / (de * pdfRev + 2 + dl * pdfFwd);
+        return 1.f / (de * pdfRev + 1 + dl * pdfFwd);
     }
 
     float BDPTMIS(PathState path, Vertex lightVertex, Vertex v, float de) {
@@ -1859,7 +2724,7 @@ struct PathTracer
         const IBSDF bsdf2 = gScene.materials.getBSDF(pt.sd, lod);
         float pdfFwd = pt.ConvertDensity(bsdf2.evalPdf(pt.sd, -wi), qs);
 
-        return 1.f / (de * pdfRev + 2 + dl * pdfFwd);
+        return 1.f / (de * pdfRev + 1 + dl * pdfFwd);
     }
 
     float BDPTMIS(PathState path, TriangleLightHit hit, float de) {
@@ -1959,4 +2824,404 @@ struct PathTracer
         const uint2 pixel = path.getPixel();
         outputColor[pixel] = float4(path.L, 1.f);
     }
+
+/*
+
+    bool handleCollectIntersection(const float3 origin, const uint primIndex) {
+        
+        const uint2 primIndex2D = uint2(primIndex % 2048, primIndex / 2048);
+
+        float radius = globalRadius;
+        float3 center = hitPointPositionI[primIndex2D].xyz;
+        float3 toCenter = center - origin;
+        return dot(toCenter, toCenter) < radius * radius;
+    }
+
+    void handleCollectAnyHit(inout uint4 payload, const float3 origin, const float3 normal, const uint primIndex, const float rnd) {
+        const uint2 primIndex2D = uint2(primIndex % 2048, primIndex / 2048);
+        const float3 hitPoinFaceN = oct_to_ndir_equal_area_unorm(normalI[primIndex2D].zw);
+
+        if (dot(normal, hitPoinFaceN) < 0.9) return;
+
+        const float3 sPos = samplePositionI[primIndex2D].xyz;
+        const float3 sN = oct_to_ndir_equal_area_unorm(normalI[primIndex2D].xy);
+        const float3 hPos = hitPointPositionI[primIndex2D].xyz;
+        // float count1 = payload.z;
+        // float weight = getIntensity(radianceI[primIndex2D].xyz);
+        uint4 reservoirNew = ReservoirI[primIndex2D];
+        float weight = asfloat(reservoirNew.x);
+
+        float3 toNew = origin - sPos;
+        float dist2New = dot(toNew, toNew);
+        toNew /= sqrt(dist2New);
+        float3 toPrev = hPos - sPos;
+        float dist2Prev = dot(toPrev, toPrev);
+        toPrev /= sqrt(dist2Prev);
+        float cosNew = abs(dot(toNew, sN));
+        float cosPrev = abs(dot(toPrev, sN));
+        float j = cosNew * dist2Prev / (cosPrev * dist2New);
+
+        float WNew = asfloat(reservoirNew.y);
+        uint MNew = reservoirNew.z;
+
+        float weightNew = weight / j * WNew * MNew;
+
+        payload.z += MNew;
+        float w = asfloat(payload.y) + weightNew;
+        payload.y = asuint(w);
+        if (rnd < weightNew / w) {
+            payload.x = asuint(weight);
+            payload.w = primIndex;
+        }
+
+    }
+
+    RayDesc generateTestRay(inout HitInfo hit) {
+        
+        VertexData v = gScene.getVertexData(hit.getTriangleHit());
+
+        RayDesc ray;
+        ray.Origin = v.posW;
+        ray.TMin = 0.0001f;
+        ray.TMax = 100.f;
+        ray.Direction = v.normalW;
+
+        return ray;
+    }
+*/
+/*
+    void CameraPathHandleHit<VisibilityQuery : IVisibilityQuery>(inout PathState path, inout VisibilityQuery vq, inout ExtraPayload exPayload, in uint4 risPayload) {
+        const bool isPrimaryHit = path.getVertexIndex() == 1;
+        const uint index = path.getVertexIndex() - 1;
+        const HitType hitType = path.hit.getType();
+        const bool isTriangleHit = hitType == HitType::Triangle;
+        
+        let lod = createTextureSampler(path, isPrimaryHit, isTriangleHit);
+
+        // Load shading data. This is a long latency operation.
+        ShadingData sd = loadShadingData(path.hit, path.origin, path.dir, isPrimaryHit, lod);
+
+        if (hasFinishedSurfaceBounces(path) || path.getVertexIndex() - 1 >= kMaxSurfaceBounces) {
+            path.terminate();
+            return;
+        }
+
+        // Account for volume absorption.
+        if (!path.interiorList.isEmpty())
+        {
+            const uint materialID = path.interiorList.getTopMaterialID();
+            const HomogeneousVolumeData hvd = gScene.materials.getHomogeneousVolumeData(materialID);
+            updatePathThroughput(path, HomogeneousVolumeSampler::evalTransmittance(hvd, length(sd.posW - path.origin)));
+        }
+
+        // Reject false hits in nested dielectrics.
+        if (!handleNestedDielectrics(sd, path)) return;
+
+        Vertex vertex = Vertex::create(sd, path.thp, path.pdf, 0, VertexType::SurfaceOrMedium);
+        vertex.pdfFwd = vertex.ConvertDensity(path);
+
+        const IBSDF bsdf = gScene.materials.getBSDF(sd, lod);
+        BSDFProperties bsdfProperties = bsdf.getProperties(sd);
+
+        const uint lobes = bsdf.getLobes(sd);
+        const bool hasNonDeltaLobes = (lobes & (uint)LobeType::NonDelta) != 0;
+
+        // Disable specular lobes if caustics are disabled and path already contains a diffuse vertex.
+        bool isSpecular = bsdfProperties.roughness <= params.specularRoughnessThreshold;
+       
+        BSDFSample bs;
+        bool valid = bsdf.sample(sd, path.sg, bs, kUseBSDFSampling);
+
+        float3 wi = sd.V;
+        ShadingData sdRev = sd;
+        sdRev.V = bs.wo;
+        const IBSDF bsdfRev = gScene.materials.getBSDF(sdRev, lod);
+        float pdfRev = bsdfRev.evalPdf(sdRev, wi);
+
+        bool hasDelta = (lobes & (uint)LobeType::Delta) != 0;
+        // bool isFirstNonDelta = (!exPayload.isFirstNonDelta) && (!hasDelta);
+        // exPayload.isFirstNonDelta = isFirstNonDelta;
+        vertex.delta = hasDelta;
+        float N = 1.f;
+
+        float convertRevPdf = remap0(vertex.ConvertRevDensity(path, pdfRev));
+
+        bool sampleUpperHemisphere = ((lobes & (uint)LobeType::NonDeltaReflection) != 0);
+        if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
+        bool sampleLowerHemisphere = ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
+
+        bool isDiffuseHit = !hasDelta;//bs.isLobe(LobeType::Diffuse) || (bs.isLobe(LobeType::Reflection) && (bsdfProperties.roughness > 0.5));
+
+        bool isFirstNonDelta = isDiffuseHit && !path.hasFlag(PathFlags::isFirstNonDelta);
+        if (isFirstNonDelta) path.setFlag(PathFlags::isFirstNonDelta, true);
+        
+        // s >= 1
+        if (!hasDelta) {
+           
+            uint sampleIndex = min(uint(counter * sampleNext1D(path.sg)), counter - 1);
+
+            VertexInfo sampleInfo = LightPathsVertexsBuffer[sampleIndex];
+
+            float3 f = 0;
+            float3 qStar = 0;
+            Ray ray;
+
+            bool visible = false;
+            float inv_M = 1.0 / float(kLightPassHeight * kLightPassWidth);
+            uint M = kLightPassHeight * kLightPassWidth;
+            
+            // float radius = 0.005 * length(dimension);
+
+            if (sampleInfo.isLight()) {
+                // light
+                float3 toSample = sampleInfo.origin - sd.posW;
+                float dist2 = dot(toSample, toSample);
+                toSample /= sqrt(dist2);
+
+                float g = max(dot(normalize(sampleInfo.dir), -toSample) / dist2, 0);
+
+                ray = getVisibiliyTestRay(vertex, sampleInfo);
+
+                sdRev.V = toSample;
+                const IBSDF bsdf2 = gScene.materials.getBSDF(sdRev, lod);
+                float pdfRev2 = vertex.ConvertRevDensity(path, bsdf2.evalPdf(sdRev, wi));
+                float de2 = (1.f + remap0(pdfRev2) * exPayload.d) / remap0(vertex.pdfFwd);
+                
+                float pdfToX = abs(dot(toSample, sampleInfo.dir)) * M_1_PI;
+                pdfToX = dot(-toSample, sd.N) * pdfToX / dist2;
+                
+                visible = vq.traceVisibilityRay(ray);
+                f = bsdf.eval(sd, toSample, path.sg) * g * sampleInfo.beta * BDPTMIS(path, sampleInfo, vertex, de2);
+                path.L += (visible) ? inv_M * vertex.beta * f * counter : 0;
+            }
+            else
+            {
+                // others
+                Vertex sample = LightPathsVertexsBuffer[sampleIndex].unpack(false);
+
+                // float3 result_q = RISWeight(v, sample, path, false);
+                ray = getVisibiliyTestRay(vertex, sample);
+
+                sdRev.V = sample.sd.posW - sd.posW;
+                float dist2 = dot(sdRev.V, sdRev.V);
+                const IBSDF bsdf2 = gScene.materials.getBSDF(sdRev, lod);
+                float pdfRev2 = vertex.ConvertRevDensity(path, bsdf2.evalPdf(sdRev, wi));
+                float de2 = (1 + remap0(pdfRev2) * exPayload.d) / remap0(vertex.pdfFwd);
+
+                float3 toSample = sdRev.V / sqrt(dist2);
+                const IBSDF sampleBsdf = gScene.materials.getBSDF(sample.sd, lod);
+                float pdfToX = sampleBsdf.evalPdf(sample.sd, -toSample);
+                pdfToX = dot(toSample, sd.N) * pdfToX / dist2;
+
+                
+
+                // float OmegaMC = (pe2 + 1.f + pl) * pdfToX * M_PI * radius * radius;// * (kLightPassHeight * kLightPassWidth);// * (kLightPassHeight * kLightPassWidth);
+                visible = vq.traceVisibilityRay(ray);
+                //visible = true;
+                qStar = visible ? sampleBsdf.eval(sample.sd, -toSample, path.sg) * sample.beta * G(sample, vertex) : 0;
+
+                if (risPayload.z == 0) {
+                    float weight = getIntensity(qStar);
+                    float W = inv_M * counter;
+                    
+                    if (weight > 0.01f) {
+                        uint aabbIndex = hitPointAABB.IncrementCounter();
+                        hitPointAABB[aabbIndex] = AABB(sd.posW - globalRadius, sd.posW + globalRadius);
+                        uint2 index2D = uint2(aabbIndex % 2048, aabbIndex / 2048);
+                        
+                        ReservoirO[index2D] = uint4(asuint(weight), asuint(W), M, aabbIndex);
+                        samplePositionO[index2D] = float4(sample.sd.posW, sampleInfo.de);
+                        hitPointPositionO[index2D] = float4(sd.posW, pdfToX);
+                        normalO[index2D] = float4(ndir_to_oct_equal_area_unorm(normalize(sample.sd.N)), ndir_to_oct_equal_area_unorm(normalize(sd.faceN)));
+                        radianceO[index2D] = float4(qStar, globalRadius);
+
+                        uint3 index3D = uint3(path.getPixel(), path.getVertexIndex() - 1);
+                        pathPos[index3D] = uint4(asuint(sd.posW), aabbIndex);
+                        pathRadiance[index3D] = float4(vertex.beta, exPayload.d);
+                        pathHitInfo[index3D] = path.hit.getData();
+                    }
+                    else {
+                        uint3 index3D = uint3(path.getPixel(), path.getVertexIndex() - 1);
+                        pathPos[index3D] = uint4(asuint(sd.posW), 0xffffffff);
+                    }
+                    
+                    //float mis = 1.f / (de2 * pdfToX + 1 + sampleInfo.de * vertex.ConvertDensity(bsdf.evalPdf(sd, toSample), sample));
+                    //path.L += vertex.beta * bsdf.eval(sd, toSample, path.sg) * qStar * W * mis;
+                    //path.L += float3(0, 1, 1);
+                }
+                else {
+                    
+                    uint4 reservoir = risPayload; // x := sample weight(float), y := total weight(float), z := sample count, w := index
+                    float weight = asfloat(risPayload.x);
+                    uint2 primIndex2D = uint2(risPayload.w % 2048, risPayload.w / 2048);
+                    float3 sPos = samplePositionI[primIndex2D].xyz;
+                    float3 hPos = hitPointPositionI[primIndex2D].xyz;
+                    float3 sN = oct_to_ndir_equal_area_unorm(normalI[primIndex2D].xy);
+
+                    float3 toNew = sd.posW - sPos;
+                    float dist2New = dot(toNew, toNew);
+                    toNew /= sqrt(dist2New);
+                    float3 toPrev = hPos - sPos;
+                    float dist2Prev = dot(toPrev, toPrev);
+                    toPrev /= sqrt(dist2Prev);
+                    float cosNew = abs(dot(toNew, sN));
+                    float cosPrev = abs(dot(toPrev, sN));
+                    float j = cosNew * dist2Prev / (cosPrev * dist2New);
+
+                    float WNew = asfloat(risPayload.y);
+                    uint MNew = min(20 * M, risPayload.z);
+
+                    float weightNew = weight / j * WNew * MNew;
+
+                    float qWeight = getIntensity(qStar);
+                    float w = qWeight * counter + weightNew;
+                    uint count = M + MNew;
+                    if (sampleNext1D(path.sg) < weightNew / w) {
+                        
+                        float W = w / (weight * count);
+                        float3 radiance = radianceI[primIndex2D].xyz;
+                        // TODO
+                        float mis = 1.f / (de2 * hitPointPositionI[primIndex2D].w + 1.f + samplePositionI[primIndex2D].w * vertex.ConvertDensity(bsdf.evalPdf(sd, -toNew), sPos, sN));
+                        //path.L += vertex.beta * bsdf.eval(sd, -toNew, path.sg) * radiance * W * mis;
+
+                        uint aabbIndex = hitPointAABB.IncrementCounter();
+                        hitPointAABB[aabbIndex] = AABB(vertex.sd.posW - globalRadius, vertex.sd.posW + globalRadius);
+                        uint2 index2D = uint2(aabbIndex % 2048, aabbIndex / 2048);
+
+                        ReservoirO[index2D] = uint4(asuint(weight), asuint(W), count, aabbIndex);
+                        samplePositionO[index2D] = samplePositionI[primIndex2D];
+                        hitPointPositionO[index2D] = float4(sd.posW, pdfToX);
+                        normalO[index2D] = float4(normalI[primIndex2D].xy, ndir_to_oct_equal_area_unorm(normalize(sd.faceN)));
+                        radianceO[index2D] = float4(radiance, globalRadius);
+                    }
+                    else {
+                        float W = w / (qWeight * count);
+                        float mis = 1.f / (de2 * pdfToX + 1 + sampleInfo.de * vertex.ConvertDensity(bsdf.evalPdf(sd, toSample), sample));
+                        //path.L += vertex.beta * bsdf.eval(sd, toSample, path.sg) * qStar * W * mis;
+
+                        uint aabbIndex = hitPointAABB.IncrementCounter();
+                        hitPointAABB[aabbIndex] = AABB(vertex.sd.posW - globalRadius, vertex.sd.posW + globalRadius);
+                        uint2 index2D = uint2(aabbIndex % 2048, aabbIndex / 2048);
+
+                        ReservoirO[index2D] = uint4(asuint(qWeight), asuint(W), count, aabbIndex);
+                        samplePositionO[index2D] = float4(sample.sd.posW, sampleInfo.de);
+                        hitPointPositionO[index2D] = float4(sd.posW, pdfToX);
+                        normalO[index2D] = float4(ndir_to_oct_equal_area_unorm(normalize(sample.sd.N)), ndir_to_oct_equal_area_unorm(normalize(sd.faceN)));
+                        radianceO[index2D] = float4(qStar, globalRadius);
+                    }
+                    //path.L += 1;
+                    
+                }
+                //f = bsdf.eval(sd, toSample, path.sg) * qStar * BDPTMIS(path, sampleIndex, vertex, de2);
+                
+                //path.L += inv_M * vertex.beta * f * counter;
+            } 
+        }
+
+        if (!hasDelta)
+        { // s == 1
+            bool validSample = false;
+
+            // Sample a point on a light and connect it to the camera subpath
+            PathVertex pvertex = PathVertex(path.getVertexIndex(), sd.posW, sd.N, sd.faceN);
+
+            Vertex lightVertex = {};
+            float3 ray_dir;
+            float dirPdf;
+            validSample = generateLightSample_BDPT(path.sg, lightVertex, ray_dir, dirPdf);
+
+            ray_dir = normalize(lightVertex.sd.posW - pvertex.pos);
+
+            float cosTheta = dot(pvertex.normal, ray_dir);
+            // Flip the face normal to point in the same hemisphere as the shading normal.
+            float3 faceNormal = sign(dot(pvertex.normal, pvertex.faceNormal)) * pvertex.faceNormal;
+            float cosThetaFace = dot(faceNormal, ray_dir);
+            if (!sampleUpperHemisphere && (max(cosTheta, cosThetaFace) >= -kMinCosTheta)) validSample = false;
+            if (!sampleLowerHemisphere && (min(cosTheta, cosThetaFace) <= kMinCosTheta)) validSample = false;
+
+            if (validSample)
+            {
+                lightVertex.beta = lightVertex.beta * dirPdf; // / abs(dot(ray_dir, lightVertex.sd.N));
+                float3 wi = lightVertex.sd.posW - vertex.sd.posW;
+                lightVertex.beta = lightVertex.beta * abs(dot(normalize(wi), lightVertex.sd.N)) / dot(wi, wi);
+                float3 lightPos = computeRayOrigin(lightVertex.sd.posW, lightVertex.sd.N);
+                float3 origin = pvertex.getRayOrigin(lightPos - sd.posW);
+                float3 toLight = lightPos - origin;
+                float distSqr = max(dot(toLight, toLight), kMinLightDistSqr);
+                float distance = sqrt(distSqr);
+                float3 dir = toLight / distance;
+
+                Ray ray = Ray(origin, dir, 0, distance);
+                float3 weight = bsdf.eval(sd, dir, path.sg);
+                float3 Lr = vertex.beta * weight * lightVertex.beta;
+
+                ShadingData sd1 = sd;
+                float3 wo = sd1.V;
+                sd1.V = -wi;
+                const IBSDF bsdf1 = gScene.materials.getBSDF(sd1, lod);
+                float pdfRev1 = vertex.ConvertRevDensity(path, bsdf1.evalPdf(sd1, wo));
+                float de1 = (1 + remap0(pdfRev1) * exPayload.d) / remap0(vertex.pdfFwd);
+
+                if (params.hasFlag(BDPTFlags::s1) && any(Lr > 0.f))
+                {
+                    // Ray ray = ls.getVisibilityRay();
+                    logTraceRay(PixelStatsRayType::Visibility);
+                    bool visible = vq.traceVisibilityRay(ray);
+
+                    // float radius = 0.005 * length(dimension);
+                    float pdfToX = dirPdf;
+                    pdfToX = dot(-dir, vertex.sd.N) * pdfToX / distSqr;
+                    if (visible) {
+                        float pdfRev = lightVertex.ConvertDensity(abs(dot(dir, lightVertex.sd.N)) * M_1_PI, vertex);
+                        float pdfFwd = vertex.ConvertDensity(bsdf.evalPdf(sd, dir), lightVertex);
+                        // todo dl
+                        float mis = 1.f / (de1 * pdfRev + 1.f + 1.f / lightVertex.pdfFwd * pdfFwd);
+                        path.L += Lr * mis;
+                    }
+                    
+                }
+            }
+        }
+
+        // s == 0
+        bool computeEmissive = kUseEmissiveLights;
+
+        // bool sampleLowerHemisphere = isCurveHit || isCurvePolyTubeHit || ((lobes & (uint)LobeType::NonDeltaTransmission) != 0);
+        if (params.hasFlag(BDPTFlags::s0) && computeEmissive && any(bsdfProperties.emission > 0.f)) {
+            TriangleHit triangleHit = path.hit.getTriangleHit();
+            TriangleLightHit hit;
+            hit.triangleIndex = gScene.lightCollection.getTriangleIndex(triangleHit.instanceID, triangleHit.primitiveIndex);
+            hit.posW = sd.posW;
+            hit.normalW = sd.frontFacing ? sd.faceN : -sd.faceN;
+
+            float cosTheta0 = abs(dot(normalize(path.dir), hit.normalW));
+            float pdfRev0 = vertex.ConvertRevDensity(path, cosTheta0 * M_1_PI);
+            float de0 = (1 + pdfRev0 * exPayload.d) / remap0(vertex.pdfFwd);
+            path.L += vertex.beta * bsdfProperties.emission * BDPTMIS(path, hit, de0);
+        }
+
+        exPayload.d = (N + exPayload.d * convertRevPdf) / remap0(vertex.pdfFwd);
+
+        path.origin = sd.computeNewRayOrigin();
+
+        if (valid) valid = generateScatterRay(bs, sd, bsdf, path);
+
+        const bool isLastVertex = hasFinishedSurfaceBounces(path) || path.getVertexIndex() >= kMaxSurfaceBounces;
+
+        if (isLastVertex || !valid) {
+            path.terminate();
+        }
+    }
+*/
 };
+
+
+/*
+Texture2D<float4> samplePosition;   // xyz := pos, w := dL
+Texture2D<float4> hitPointPosition; // xyz := pos, w := p_toLeft
+Texture2D<float4> normal;           // xy := sample normal, zw := hit point normal
+Texture2D<float4> radiance;         // rgb := radiance, w := radii
+
+// reservoir
+Texture2D<uint4> Reservoir; // x := sample weight(float), y := W (float), z := sample count, w := index
+*/

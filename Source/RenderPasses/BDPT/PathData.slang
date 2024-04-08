@@ -146,6 +146,7 @@ enum class VertexFlag {
     valid = 0x0004,
     delta = 0x0008,
     visible = 0x0010,
+    diffuseHit = 0x0020
 };
 
 struct VertexInfo
@@ -157,12 +158,16 @@ struct VertexInfo
     float pdfRev = 0;
     float3 beta;
     uint flagAndType = 0;
+    float3 originN;
     float de = 0;
+    float pe = 0;
+    uint prevIndex;
 
     static VertexInfo create(PathState path, Vertex v) {
         VertexInfo vinfo = {};
         vinfo.hitData = path.hit.getData();
         vinfo.origin = path.origin;
+        vinfo.originN = path.normal;
         vinfo.dir = path.dir;
         vinfo.pdfFwd = v.pdfFwd;
         vinfo.pdfRev = v.pdfRev;
@@ -229,6 +234,10 @@ struct VertexInfo
         return (flagAndType & uint(VertexFlag::valid)) != 0;
     }
 
+    bool isCausticHit() {
+        return (flagAndType & uint(VertexFlag::diffuseHit)) != 0;
+    }
+
     bool isLight() {
         uint type = flagAndType & uint(VertexFlag::typeMask);
         return type == uint(VertexType::Light);
@@ -240,6 +249,15 @@ struct VertexInfo
 
     VertexType getType() {
         return VertexType(flagAndType & uint(VertexFlag::typeMask));
+    }
+
+    [mutating] void setFlag(bool tOrf, VertexFlag flag) {
+        if (tOrf) {
+            flagAndType |= uint(flag);
+        }
+        else {
+            flagAndType &= ~uint(flag);
+        }
     }
 
     [mutating] void setDelta(bool delta) {
@@ -356,3 +374,38 @@ inline float normalizedWeights(float l2_0, float l2_1, float intensGeom0, float 
     float ww1 = l2_0 * intensGeom1;
     return ww0 / (ww0 + ww1);
 };
+
+float InterlockedAddFloat(RWTexture2D<uint> buf, uint2 addr, float value)
+{
+    uint i_val = asuint(value);
+    uint tmp0 = 0;
+    uint tmp1;
+    while (true)
+    {
+        InterlockedCompareExchange(buf[addr], tmp0, i_val, tmp1);
+        if (tmp1 == tmp0) {
+            return asfloat(tmp1);
+        }
+        tmp0 = tmp1;
+        i_val = asuint(value + asfloat(tmp1));
+    }
+}
+
+#define AVAILABLE 0xffffffff
+
+void myLock(RWTexture2D<uint> signal, uint2 addr, uint threadSymbol)
+{
+    uint tmp1;
+    while (true)
+    {
+        InterlockedCompareExchange(signal[addr], AVAILABLE, threadSymbol, tmp1);
+        if (tmp1 == AVAILABLE) return;
+    }
+}
+
+uint myUnlock(RWTexture2D<uint> signal, uint2 addr)
+{
+    uint tmp1;
+    InterlockedExchange(signal[addr], AVAILABLE, tmp1);
+    return tmp1;
+}

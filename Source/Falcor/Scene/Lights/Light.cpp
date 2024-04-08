@@ -466,5 +466,7 @@ namespace Falcor
 
         pybind11::class_<SphereLight, AnalyticAreaLight, SphereLight::SharedPtr> sphereLight(m, "SphereLight");
         sphereLight.def(pybind11::init(&SphereLight::create), "name"_a = "");
+        sphereLight.def_property("scale", &SphereLight::getScaling, &SphereLight::setScaling);
+        sphereLight.def_property("mtx", &SphereLight::getTransformMatrix, &SphereLight::setTransformMatrix_T);
    }
 }

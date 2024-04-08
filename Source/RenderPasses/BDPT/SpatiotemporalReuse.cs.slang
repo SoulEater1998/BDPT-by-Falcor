@@ -23,6 +23,10 @@ struct SpatiotemproalReuse
 
     const int screenSpaceReuseDomain = 3;
 
+    Texture3D<uint4> pathPos;       // xyz := pos, w := index
+    Texture3D<float4> pathRadiance; // xyz := radiance, w := de;
+    Texture3D<uint4> pathHitInfo;
+
     inline uint cameraPathOffset(uint2 pixel, int offset = 0) {
         uint base = (pixel.y * params.frameDim.x + pixel.x) * kMaxSurfaceBounces;
         return base + offset;
@@ -222,15 +226,15 @@ struct SpatiotemproalReuse
     void execute(const uint2 pixel) {
         float3 Lr = 0;
         bool isValid = true;
-        /*
-        if(params.hasFlag(BDPTFlags::s2) && params.hasFlag(BDPTFlags::spatialReuse))
-        {
-            for (uint i = 0; (i < kMaxSurfaceBounces) && isValid; ++i) {
-                Lr += SpatialReuse(pixel, i, isValid);
+        for (uint i = 0; i < 5; ++i) {
+            uint3 index3D = uint3(pixel, i);
+            uint4 posAndIndex = pathPos[index3D];
+            float3 radiance = pathRadiance[index3D].xyz;
+            if (posAndIndex.w != 0xffffffff) {
+                Lr += radiance;
             }
         }
-        */
-        outputColor[pixel] = output[pixel];// + (float4(Lr, 0));
+        outputColor[pixel] = (float4(Lr, 0));
     }
 };
 

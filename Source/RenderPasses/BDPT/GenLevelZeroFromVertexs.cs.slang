@@ -11,6 +11,7 @@ cbuffer CSConstants
     int numLeafNodes;
     int numLevels;
     int counter;
+    float radius;
 };
 
 StructuredBuffer<uint2> keyIndexList;
@@ -38,14 +39,18 @@ void main(uint3 DTid : SV_DispatchThreadID)
 			// needs to be corner + (1+eps)dimension)
             float3 boundMin = 1e10;
             float3 boundMax = -1e10;
-            node.betaSum = posAndIntensity.w;
+            node.betaSum = 1;//posAndIntensity.w;
 
             if (node.betaSum > 0) //valid vertex
             {
-                boundMin = posAndIntensity.xyz;
+                node.boundMin = posAndIntensity.xyz - radius;
+                node.boundMax = posAndIntensity.xyz + radius;
             }
-
-            node.boundMax = node.boundMin = boundMin;
+            else {
+                node.boundMax = node.boundMin = boundMin;
+            }
+            
+            node.mortonRange = KeyIndexPair.y;
         }
         else
         {
@@ -53,6 +58,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
             node.betaSum = 0;
             node.boundMin = 1e10;
             node.boundMax = -1e10;
+            node.mortonRange = 0;
         }
 
         nodes[nodeArr] = node;

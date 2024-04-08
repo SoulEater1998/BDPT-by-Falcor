@@ -12,6 +12,7 @@ import PathTracer;
 import PathData;
 
 ParameterBlock<PathTracer> gPathTracer;
+RaytracingAccelerationStructure gHitPointAS;
 Scheduler gScheduler;
 
 // Define ray indices.
@@ -80,6 +81,23 @@ struct PathPayload
     }
 };
 
+struct SimplePayload
+{
+    PackedHitInfo hit;
+    bool isHit;
+}
+
+struct RISPayload
+{
+    uint4 packed; // x := sample weight(float), y := total weight(float), z := sample count, w := index
+    SampleGenerator sg;
+}
+
+struct SphereAttribs
+{
+    float2 pad;
+};
+
 struct VisibilityQuery : PathTracer::IVisibilityQuery
 {
     bool traceVisibilityRay(const Ray ray)
@@ -93,6 +111,18 @@ struct VisibilityQuery : PathTracer::IVisibilityQuery
 */
 struct Scheduler
 {
+    bool handleCollectIntersection(const float3 origin, const uint primIndex) {
+        return false;//gPathTracer.handleCollectIntersection(origin, primIndex);
+    }
+
+    void handleCollectAnyHit(inout RISPayload payload, const float3 origin, const float3 normal, const uint primIndex) {
+        //uint4 reservoir = payload.packed;
+        float rnd = sampleNext1D(payload.sg);
+        payload.packed.z = 1;
+        //gPathTracer.handleCollectAnyHit(payload.packed, origin, normal, primIndex, rnd);
+        //payload.packed = reservoir;
+    }
+    
     /** Handle a miss.
         \param[in,out] payload Payload data.
     */
@@ -139,7 +169,7 @@ struct Scheduler
         This replaces `PathTracer::nextHit` but without support for volume sampling.
         \param[in,out] path Path state.
     */
-    void nextHit(inout PathState path, inout float de)
+    void nextHit(inout PathState path, inout ExtraPayload exPayload)
     {
         // Advance to next path vertex.
         path.incrementVertexIndex();
@@ -147,6 +177,7 @@ struct Scheduler
         // Trace ray.
         logTraceRay(PixelStatsRayType::ClosestHit);
         const Ray ray = path.getScatterRay();
+        //SimplePayload payload = {};
         PathPayload payload = PathPayload::pack(path);
         uint rayFlags = RAY_FLAG_NONE;
         if (!kUseAlphaTest) rayFlags |= RAY_FLAG_FORCE_OPAQUE;
@@ -154,9 +185,25 @@ struct Scheduler
 
         path = PathPayload::unpack(payload);
         if (path.isActive()) {
+            //RayDesc rayDesc = gPathTracer.generateTestRay(path.hit);
+
+            RISPayload risPayload = {};
+            /*
+            risPayload.sg = path.sg;
+            risPayload.packed.z = 0;
+            if (gPathTracer.params.frameCount != 0) {
+                TraceRay(gScene.rtAccel, RAY_FLAG_NONE, 0xff, 1, rayTypeCount, 1, ray.toRayDesc(), risPayload);
+                // path.L += risPayload.packed.z != 0 ? 10 : 0;
+                if(any(risPayload.packed != 0)) path.L += 10;
+            }
+            //risPayload.packed = 0;
+            //if (risPayload.packed.z != 0) risPayload.packed.y = asuint(asfloat(risPayload.packed.y) / (asfloat(risPayload.packed.x) * risPayload.packed.z));
+            path.sg = risPayload.sg;
+            */
             VisibilityQuery vq;
-            gPathTracer.CameraPathHandleHit(path, vq, de);
+            gPathTracer.CameraPathHandleHit(path, vq, exPayload/*, risPayload.packed*/);
         }
+
         
     }
 
@@ -167,7 +214,7 @@ struct Scheduler
     {
         PathState path = {};
         // Vertex cameraPath[6];
-        float de = 0;
+        ExtraPayload exPayload = {};
         gPathTracer.generatePath(pathID, path);
         gPathTracer.setupPathLogging(path);
 
@@ -179,9 +226,22 @@ struct Scheduler
 #elif defined(DELTA_TRANSMISSION_PASS)
             gPathTracer.handleDeltaTransmissionHit(path);
 #else
+            
+            //RayDesc rayDesc = gPathTracer.generateTestRay(path.hit);
+            RISPayload risPayload = {};
+            /*
+            risPayload.sg = path.sg;
+            if (gPathTracer.params.frameCount != 0) {
+                TraceRay(gScene.rtAccel, RAY_FLAG_NONE, 0xff, 1, rayTypeCount, 1, rayDesc, risPayload);
+                path.L += risPayload.packed.z != 0 ? 1 : 0;
+                //if (all(risPayload.packed == 0)) path.L += 1;
+            } 
+            */
+            //if (risPayload.packed.z != 0) risPayload.packed.y = asuint(asfloat(risPayload.packed.y) / (asfloat(risPayload.packed.x) * risPayload.packed.z));
+            //path.sg = risPayload.sg;
             VisibilityQuery vq;
             // path.setVertexIndex(0);
-            gPathTracer.CameraPathHandleHit(path, vq, de);
+            gPathTracer.CameraPathHandleHit(path, vq, exPayload/*, risPayload.packed*/);
             //gPathTracer.handleHit(path, vq);
 #endif
         }
@@ -196,7 +256,7 @@ struct Scheduler
         
         while (path.isActive())
         {
-            nextHit(path, de);
+            nextHit(path, exPayload);
         }
         
         #if !defined(DELTA_REFLECTION_PASS) && !defined(DELTA_TRANSMISSION_PASS)
@@ -231,6 +291,7 @@ struct Scheduler
 void scatterMiss(inout PathPayload payload : SV_RayPayload)
 {
     gScheduler.handleMiss(payload);
+    //payload.isHit = false;
 }
 
 //
@@ -256,6 +317,10 @@ void scatterTriangleClosestHit(inout PathPayload payload : SV_RayPayload, BuiltI
     triangleHit.instanceID = getGeometryInstanceID();
     triangleHit.primitiveIndex = PrimitiveIndex();
     triangleHit.barycentrics = attribs.barycentrics;
+    //payload.hit = HitInfo(triangleHit).getData();
+
+    //payload.isHit = true;
+
     gScheduler.handleHit(payload, HitInfo(triangleHit), RayTCurrent());
 }
 
@@ -283,6 +348,8 @@ void scatterDisplacedTriangleMeshClosestHit(inout PathPayload payload, Displaced
     displacedTriangleHit.primitiveIndex = PrimitiveIndex();
     displacedTriangleHit.barycentrics = attribs.barycentrics;
     displacedTriangleHit.displacement = attribs.displacement;
+    //payload.hit = HitInfo(displacedTriangleHit).getData();
+    //payload.isHit = true;
     gScheduler.handleHit(payload, HitInfo(displacedTriangleHit), RayTCurrent());
 }
 
@@ -309,6 +376,8 @@ void scatterCurveClosestHit(inout PathPayload payload, CurveIntersector::Attribs
     curveHit.instanceID = getGeometryInstanceID();
     curveHit.primitiveIndex = PrimitiveIndex();
     curveHit.barycentrics = attribs.barycentrics;
+    //payload.hit = HitInfo(curveHit).getData();
+    //payload.isHit = true;
     gScheduler.handleHit(payload, HitInfo(curveHit), RayTCurrent());
 }
 
@@ -335,8 +404,48 @@ void scatterSdfGridClosestHit(inout PathPayload payload, SDFGridHitData sdfGridH
     SDFGridHit sdfGridHit;
     sdfGridHit.instanceID = getGeometryInstanceID();
     sdfGridHit.hitData = sdfGridHitData;
+    //payload.hit = HitInfo(sdfGridHit).getData();
+    //payload.isHit = true;
     gScheduler.handleHit(payload, HitInfo(sdfGridHit), RayTCurrent());
 }
+
+//
+// Shader entry points for neighbor collect groups.
+// 
+[shader("intersection")]
+void RISIntersection()
+{
+    const float3 origin = ObjectRayOrigin();
+    const uint primIndex = PrimitiveIndex();
+
+    //bool tHit = gScheduler.handleCollectIntersection(origin, primIndex);
+    SphereAttribs attribs;
+    attribs.pad = float2(0);
+    bool tHit = true;
+    if (tHit) {
+        ReportHit(0.1f, 0, attribs);
+    }
+}
+
+[shader("anyhit")]
+void RISAnyHit(inout RISPayload payload : SV_RayPayload, SphereAttribs pad : SV_IntersectionAttributes)
+{
+    //const float3 origin = ObjectRayOrigin();
+    //const float3 normal = ObjectRayDirection();
+    //const uint primIndex = PrimitiveIndex();
+    uint4 packed = payload.packed;
+    packed.z = packed.z + 1;
+    payload.packed = 100;
+    //payload.packed.z += pad.pad.x > 0 ? 1 : 0;
+    //gScheduler.handleCollectAnyHit(payload, origin, normal, primIndex);
+}
+
+[shader("miss")]
+void RISMiss(inout RISPayload payload)
+{
+    payload.packed.z = 10;
+}
+
 
 //
 // Shader entry point for ray generation shader.

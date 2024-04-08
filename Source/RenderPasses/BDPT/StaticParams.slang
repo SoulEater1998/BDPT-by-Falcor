@@ -61,4 +61,6 @@ static const uint kMISHeuristic = MIS_HEURISTIC;
 static const float kMISPowerExponent = MIS_POWER_EXPONENT;
 static const uint kLightPassWidth = LIGHT_PASS_WIDTH;
 static const uint kLightPassHeight = LIGHT_PASS_HEIGHT;
-static const uint kCandidateNumber = CANDIDATE_NUMBER;
+
+static const uint kLogSize = LOG_SUBSPACE_SIZE;
+//static const uint kCandidateNumber = CANDIDATE_NUMBER;

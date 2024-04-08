@@ -5,4 +5,5 @@ struct Node
     float betaSum;
     float3 boundMax;
     uint ID;
+    uint2 mortonRange;
 };

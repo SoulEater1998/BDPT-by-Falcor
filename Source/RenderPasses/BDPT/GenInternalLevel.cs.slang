@@ -73,8 +73,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
                 node.betaSum += srcNode.betaSum;
                 node.boundMin = min(srcNode.boundMin, node.boundMin);
                 node.boundMax = max(srcNode.boundMax, node.boundMax);
+                node.mortonRange.y = nodes[nodeId].mortonRange.y;
             }
         }
+        
         nodes[dstNodeArr] = node;
     }
 }

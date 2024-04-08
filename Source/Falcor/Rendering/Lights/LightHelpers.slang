@@ -347,16 +347,17 @@ bool samplePointLight_BDPT(const LightData light, const float2 u_d, out Analytic
     ls.normalW = light.dirW;
 
     // Sample a direction
-    float pdf;
-    float3 w = sample_cosine_hemisphere_concentric(u_d, pdf);
+    float cosThetaMax = light.cosOpeningAngle;
+    float pdf = 1 / (M_2PI * (1 - cosThetaMax));
+    float3 w = sample_cone(u_d, cosThetaMax);
     float3 v2, v3;
-    float3 n = ls.normalW;
+    float3 n = light.dirW;
     CoordinateSystem(n, v2, v3);
     ls.dir = normalize(w.x * v2 + w.y * v3 + w.z * n);
     ls.distance = pdf;
 
     // Calculate the falloff for spot-lights.
-    float cosTheta = -dot(ls.dir, light.dirW);
+    float cosTheta = dot(normalize(ls.dir), normalize(light.dirW));
     float falloff = 1.f;
     if (cosTheta < light.cosOpeningAngle)
     {
@@ -371,8 +372,8 @@ bool samplePointLight_BDPT(const LightData light, const float2 u_d, out Analytic
     // Compute incident radiance at shading point.
     ls.Li = light.intensity * falloff;
 
-    // For a point light, the PDF with respect to solid angle is a Dirac function. Set to zero.
-    ls.pdf = 0.f;
+    // For a point light, the PDF with respect to solid angle is a Dirac function. Set to 1.
+    ls.pdf = 1.f;
 
     return true;
 }

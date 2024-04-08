@@ -390,7 +390,7 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    ErrorMetric metric = errorMetrics.front();
+    ErrorMetric metric = errorMetrics[3];
     if (metricFlag)
     {
         auto name = args::get(metricFlag);

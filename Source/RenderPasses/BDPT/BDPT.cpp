@@ -30,9 +30,11 @@
 #include "RenderGraph/RenderPassHelpers.h"
 #include "RenderGraph/RenderPassStandardFlags.h"
 #include "Rendering/Lights/EmissiveUniformSampler.h"
+
 //#include "PathData.slang"
 
 static const uint zero = 0;
+static const bool fastBuild = true;
 static const uint4 zero4 = uint4(0, 0, 0, 0);
 const RenderPass::Info BDPT::kInfo { "BDPT", "Insert pass description here." };
 
@@ -44,8 +46,10 @@ namespace
     const std::string kTraceLightPathFilename = "RenderPasses/BDPT/TraceLightPath.rt.slang";
     const std::string kTraceCameraPathFilename = "RenderPasses/BDPT/TraceCameraPath.rt.slang";
     const std::string kResolvePassFilename = "RenderPasses/BDPT/ResolvePass.cs.slang";
+    const std::string kMapPassFilename = "RenderPasses/BDPT/Map.cs.slang";
     const std::string kReflectTypesFile = "RenderPasses/BDPT/ReflectTypes.cs.slang";
     const std::string kSpatiotemporalReuseFilename = "RenderPasses/BDPT/SpatiotemporalReuse.cs.slang";
+    const std::string kCullingPassFilename = "RenderPasses/BDPT/PhotonCulling.cs.slang";
 
     const std::string kShaderModel = "6_5";
 
@@ -250,6 +254,11 @@ BDPT::BDPT(const Dictionary& dict) : RenderPass(kInfo)
     // Create resolve pass. This doesn't depend on the scene so can be created here.
     auto defines = mStaticParams.getDefines(*this);
     mpResolvePass = ComputePass::create(Program::Desc(kResolvePassFilename).setShaderModel(kShaderModel).csEntry("main"), defines, false);
+
+    Program::DefineList subSpaceDefines;
+    subSpaceDefines.add("GROUP_SIZE", std::to_string(1 << (mStaticParams.logSubspaceSize - 1)));
+    mpMergePass = ComputePass::create(kMapPassFilename, "main", subSpaceDefines);
+    mpPrefixSumPass = ComputePass::create(kMapPassFilename, "scan", subSpaceDefines);
 
     // Note: The other programs are lazily created in updatePrograms() because a scene needs to be present when creating them.
 
@@ -504,8 +513,30 @@ void BDPT::sortPosition(RenderContext* pRenderContext) {
 
 }
 
+BDPT::CollectPass::CollectPass(const std::string& shaderFile, const Scene::SharedPtr& pScene) {
+    uint maxPayloadSize = 48u;
+
+    RtProgram::Desc desc;
+    desc.addShaderLibrary(shaderFile);
+    desc.setMaxPayloadSize(maxPayloadSize);
+    desc.setMaxAttributeSize(8u);
+    desc.setMaxTraceRecursionDepth(2u);
+
+    pBindingTable = RtBindingTable::create(1, 1, pScene->getGeometryCount());
+    auto& sbt = pBindingTable;
+    sbt->setRayGen(desc.addRayGen("rayGen"));
+    sbt->setMiss(0, desc.addMiss("miss"));
+    auto hitShader = desc.addHitGroup("", "anyHit", "intersection");
+    sbt->setHitGroup(0, 0, hitShader);
+
+    pProgram = RtProgram::create(desc, pScene->getSceneDefines());
+}
+
 void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
+    //initTimer();
+
+    //pGpuTimer->begin();
     if (!beginFrame(pRenderContext, renderData)) return;
 
     // Update shader program specialization.
@@ -517,6 +548,8 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     // Prepare the path tracer parameter block.
     // This should be called after all resources have been created.
     preparePathTracer(renderData);
+
+    //if (mRebuild) prepareAccelerationStructure(pRenderContext);
 
     // Generate paths at primary hits.
     generatePaths(pRenderContext, renderData);
@@ -539,45 +572,286 @@ void BDPT::execute(RenderContext* pRenderContext, const RenderData& renderData)
     //pRenderContext->clearUAV(mpLightPathsIndexBuffer->getUAV().get(), zero4);
     pRenderContext->uavBarrier(mpLightPathsIndexBuffer->getUAVCounter().get());
     pRenderContext->clearUAVCounter(mpLightPathsIndexBuffer, 0);
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("init part " + std::to_string(pGpuTimer->getElapsedTime()));
+
+    //pGpuTimer->begin();
     FALCOR_ASSERT(mpTraceLightPath);
     tracePass(pRenderContext, renderData, *mpTraceLightPath, uint2(mStaticParams.lightPassWidth, mStaticParams.lightPassHeight));
 
     pRenderContext->uavBarrier(mpLightPathVertexBuffer.get());
+    //pRenderContext->uavBarrier(mpLightPathsVertexsPositionBuffer.get());
     pRenderContext->uavBarrier(mpLightPathsIndexBuffer.get());
-    //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer->getUAVCounter().get());
-    //pRenderContext->clearUAVCounter(mpCameraPathsIndexBuffer, 0);
-    //pRenderContext->uavBarrier(mpMCounter.get());
+
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("light path: " + std::to_string(pGpuTimer->getElapsedTime()));
+    //pGpuTimer->begin();
     // Generate camera path
-    //pRenderContext->copyBufferRegion(mpLightPathsIndexBuffer.get(), 0, mpLightPathsIndexBuffer->getUAVCounter().get(), 0, 4);
-
-    //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
-    //pRenderContext->uavBarrier(mpCameraPathsIndexBuffer.get());
-
+    
     auto kCounterPtr = (uint*)mpLightPathsIndexBuffer->getUAVCounter()->map(Buffer::MapType::Read);
     uint counter = *kCounterPtr;
+    logWarning(std::to_string(counter));
     mpSortPass->setListCount(counter);
     mpSortPass->sort(pRenderContext);
-
-    mpTreeBuilder->update(counter);
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("sort: " + std::to_string(pGpuTimer->getElapsedTime()));
+    //pGpuTimer->begin();
+    mpTreeBuilder->update(counter, radius);
     mpTreeBuilder->build(pRenderContext);
     //mpSortPass->sortTest(pRenderContext, renderData.getTexture(kOutputColor), mParams.frameDim);
-    
+
     pRenderContext->uavBarrier(mpTreeBuilder->getTree().get());
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("build tree: " + std::to_string(pGpuTimer->getElapsedTime()));
+    //pGpuTimer->begin();
+    //mpPrevGatherPoints->uavBarrier(pRenderContext);
+        
+    //pRenderContext->clearUAVCounter(mpAABB, 0);  
+   
+
     FALCOR_ASSERT(mpTraceCameraPath);
-    auto var = mpPathTracerBlock->getRootVar();
-    var["leafNodeStart"] = mpTreeBuilder->getLeafNodeStartIndex();
-    var["counter"] = counter;
+    {
+        auto var = mpPathTracerBlock->getRootVar();
+        var["leafNodeStart"] = mpTreeBuilder->getLeafNodeStartIndex();
+        var["counter"] = counter;
+    }
     tracePass(pRenderContext, renderData, *mpTraceCameraPath, mParams.frameDim);
-    
+    mpSubspaceReservoir->uavBarrier(pRenderContext);
+    mpGatherPoints->uavBarrier(pRenderContext);
+    //mpPairs->uavBarrier(pRenderContext);
+    pRenderContext->uavBarrier(mpSubspaceWeight[0].get());
+    pRenderContext->uavBarrier(mpSubspaceCount[0].get());
+    pRenderContext->uavBarrier(mpSubspaceSecondaryMoment.get());
+    //pRenderContext->uavBarrier(mpAABB->getUAVCounter().get());
     pRenderContext->uavBarrier(mpOutput.get());
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("eye path: " + std::to_string(pGpuTimer->getElapsedTime()));
+    //pGpuTimer->begin();
+    //auto kValidCounterPtr = (uint*)mpAABB->getUAVCounter()->map(Buffer::MapType::Read);
+    //uint validCounter = *kValidCounterPtr;
+    //logWarning(std::to_string(validCounter));
+    
+    //pRenderContext->uavBarrier(mpHashBuffer.get());
+
+    // culling
+    /*
+    {
+        pRenderContext->clearUAVCounter(mpCausticBuffers.infoFlux, 0);
+        pRenderContext->clearUAVCounter(mpGlobalBuffers.infoFlux, 0);
+        auto var = mpCullingPass->getRootVar();
+        var["CSConstants"]["num"] = counter;
+        uint hashSize = 1 << mStaticParams.cullingHashBufferSizeBytes;
+        var["CSConstants"]["gHashSize"] = hashSize;
+        var["CSConstants"]["gYExtent"] = static_cast<uint>(sqrt(hashSize));
+        var["CSConstants"]["gGlobalRadius"] = radius;
+
+        if (mVarsChanged) {
+            var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+            var["LightPathsVertexsPositionBuffer"] = mpLightPathsVertexsPositionBuffer;
+
+            for (uint32_t i = 0; i <= 1; i++) {
+                var["gPhotonAABB"][i] = i == 0 ? mpCausticBuffers.aabb : mpGlobalBuffers.aabb;
+                var["gPhotonFlux"][i] = i == 0 ? mpCausticBuffers.infoFlux : mpGlobalBuffers.infoFlux;
+                var["gPhotonDir"][i] = i == 0 ? mpCausticBuffers.infoDir : mpGlobalBuffers.infoDir;
+            }
+
+            var["hashBuffer"] = mpHashBuffer;
+        }
+
+        mpCullingPass->execute(pRenderContext, counter, 1);
+    }
+    */
+
+    //spatiotemporalReuse(pRenderContext, renderData);
+
+    //buildAccelerationStructure(pRenderContext);
+
     pRenderContext->copyResource(renderData.getTexture(kOutputColor).get(), mpOutput.get());
+    if(mUseSubspace) buildSubspaceWeightMatrix(pRenderContext, renderData);
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("update matrix: " + std::to_string(pGpuTimer->getElapsedTime()));
     //spatiotemporalReuse(pRenderContext, renderData);
     // Resolve pass.
     //resolvePass(pRenderContext, renderData);
 
     //pRenderContext->uavBarrier(mpCameraPathsVertexsReservoirBuffer.get());
     //pRenderContext->uavBarrier(mpOutput.get());
+    //pGpuTimer->begin();
     endFrame(pRenderContext, renderData);
+    //pGpuTimer->end();
+    //pGpuTimer->resolve();
+    //logWarning("end: " + std::to_string(pGpuTimer->getElapsedTime()));
+}
+
+double BDPT::checkTime(RenderContext* pRenderContext) {
+    //pRenderContext->readti
+    auto currentTime = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsedSec = currentTime - mCurrentTime;
+    mCurrentTime = currentTime;
+    return elapsedSec.count();
+}
+
+void BDPT::prepareAccelerationStructure(RenderContext* pRenderContext) {
+    //mPhotonInstanceDesc = nullptr;
+    mpTlasScratch = nullptr;
+    mPhotonTlas.pInstanceDescs = nullptr; mPhotonTlas.pSrv = nullptr; mPhotonTlas.pTlas = nullptr;
+
+    mBlasScratchMaxSize = 0;
+    mTlasScratchMaxSize = 0;
+
+    // prepare blas
+    { 
+        auto& blas = mBlasData;
+
+        //Create geometry description
+        D3D12_RAYTRACING_GEOMETRY_DESC& desc = blas.geomDescs;
+        desc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+        desc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION;         //< Important! So that photons are not collected multiple times
+        desc.AABBs.AABBCount = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
+        desc.AABBs.AABBs.StartAddress = mpAABB->getGpuAddress();
+        desc.AABBs.AABBs.StrideInBytes = sizeof(D3D12_RAYTRACING_AABB);
+
+        //Create input for blas
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs = blas.buildInputs;
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = 1;
+        inputs.pGeometryDescs = &blas.geomDescs;
+
+        //Updating is no option for BLAS as individual photons move to much.
+
+        inputs.Flags = fastBuild ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        //get prebuild Info
+        FALCOR_GET_COM_INTERFACE(gpDevice->getApiHandle(), ID3D12Device5, pDevice5);
+        pDevice5->GetRaytracingAccelerationStructurePrebuildInfo(&blas.buildInputs, &blas.prebuildInfo);
+
+        // Figure out the padded allocation sizes to have proper alignment.
+        FALCOR_ASSERT(blas.prebuildInfo.ResultDataMaxSizeInBytes > 0);
+        blas.blasByteSize = align_to((uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, blas.prebuildInfo.ResultDataMaxSizeInBytes);
+
+        uint64_t scratchByteSize = std::max(blas.prebuildInfo.ScratchDataSizeInBytes, blas.prebuildInfo.UpdateScratchDataSizeInBytes);
+        blas.scratchByteSize = align_to((uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, scratchByteSize);
+
+        mBlasScratchMaxSize = std::max(blas.scratchByteSize, mBlasScratchMaxSize);
+        
+
+        //Create the scratch and blas buffers
+        mpBlasScratch = Buffer::create(mBlasScratchMaxSize, Buffer::BindFlags::UnorderedAccess, Buffer::CpuAccess::None);
+        mpBlasScratch->setName("BDPT::BlasScratch");
+
+        mpBlas = Buffer::create(mBlasData.blasByteSize, Buffer::BindFlags::AccelerationStructure, Buffer::CpuAccess::None);
+    }
+
+    // prepare tlas
+    {
+        D3D12_RAYTRACING_INSTANCE_DESC desc = {};
+        desc.AccelerationStructure = mpBlas->getGpuAddress();
+        desc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        desc.InstanceID = 0;
+        desc.InstanceMask = 1;  //0b01 for Caustic and 0b10 for Global
+        desc.InstanceContributionToHitGroupIndex = 0;
+
+        //Create a identity matrix for the transform and copy it to the instance desc
+        //glm::mat4 transform4x4 = glm::identity<glm::mat4>();
+        //std::memcpy(desc.Transform, &transform4x4, sizeof(desc.Transform));
+        mPhotonInstanceDesc = desc;
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = 1;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+
+        //Prebuild
+        FALCOR_GET_COM_INTERFACE(gpDevice->getApiHandle(), ID3D12Device5, pDevice5);
+        pDevice5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &mTlasPrebuildInfo);
+        mpTlasScratch = Buffer::create(std::max(mTlasPrebuildInfo.ScratchDataSizeInBytes, mTlasScratchMaxSize), Buffer::BindFlags::UnorderedAccess, Buffer::CpuAccess::None);
+        mpTlasScratch->setName("BDPT::TLAS_Scratch");
+
+        //Create buffers for the TLAS
+        mPhotonTlas.pTlas = Buffer::create(mTlasPrebuildInfo.ResultDataMaxSizeInBytes, Buffer::BindFlags::AccelerationStructure, Buffer::CpuAccess::None);
+        mPhotonTlas.pTlas->setName("BDPT::TLAS");
+        mPhotonTlas.pInstanceDescs = Buffer::create(sizeof(D3D12_RAYTRACING_INSTANCE_DESC), Buffer::BindFlags::None, Buffer::CpuAccess::Write, &mPhotonInstanceDesc);
+        mPhotonTlas.pInstanceDescs->setName("BDPT::TLAS_Instance_Description");
+
+        //Acceleration Structure Buffer view for access in shader
+        mPhotonTlas.pSrv = ShaderResourceView::createViewForAccelerationStructure(mPhotonTlas.pTlas);
+    }
+
+    if (mRebuild) mRebuild = false;
+}
+
+void BDPT::buildAccelerationStructure(RenderContext* pContext) {
+    uint aabbCount;
+    auto pCounter = (uint*)mpAABB->getUAVCounter()->map(Buffer::MapType::Read);
+    aabbCount = *pCounter;
+    //logWarning(std::to_string(aabbCount));
+    
+
+    // build blas
+    {
+        if (!gpDevice->isFeatureSupported(Device::SupportedFeatures::Raytracing))
+        {
+            throw std::exception("Raytracing is not supported by the current device");
+        }
+
+        //aabb buffers need to be ready
+        pContext->uavBarrier(mpAABB.get());
+
+        auto& blas = mBlasData;
+
+        //barriers for the scratch and blas buffer
+        pContext->uavBarrier(mpBlasScratch.get());
+        pContext->uavBarrier(mpBlas.get());
+
+        //add the photon count for this iteration. geomDesc is saved as a pointer in blasInputs
+        uint maxPhotons = kMaxFrameDimension * kMaxFrameDimensionY * mStaticParams.maxSurfaceBounces;
+        aabbCount = std::min(aabbCount, maxPhotons);
+        blas.geomDescs.AABBs.AABBCount = static_cast<UINT64>(aabbCount);
+
+        //Fill the build desc struct
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+        asDesc.Inputs = blas.buildInputs;
+        asDesc.ScratchAccelerationStructureData = mpBlasScratch->getGpuAddress();
+        asDesc.DestAccelerationStructureData = mpBlas->getGpuAddress();
+
+        //Build the acceleration structure
+        FALCOR_GET_COM_INTERFACE(pContext->getLowLevelData()->getCommandList(), ID3D12GraphicsCommandList4, pList4);
+        pList4->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+
+        //Barrier for the blas
+        pContext->uavBarrier(mpBlas.get());
+    }
+
+    //
+    {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = 1;
+        //Update Flag could be set for TLAS. This made no real time difference in our test so it is left out. Updating could reduce the memory of the TLAS scratch buffer a bit
+        inputs.Flags = fastBuild ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC asDesc = {};
+        asDesc.Inputs = inputs;
+        asDesc.Inputs.InstanceDescs = mPhotonTlas.pInstanceDescs->getGpuAddress();
+        asDesc.ScratchAccelerationStructureData = mpTlasScratch->getGpuAddress();
+        asDesc.DestAccelerationStructureData = mPhotonTlas.pTlas->getGpuAddress();
+
+        // Create TLAS
+        FALCOR_GET_COM_INTERFACE(pContext->getLowLevelData()->getCommandList(), ID3D12GraphicsCommandList4, pList4);
+        pContext->resourceBarrier(mPhotonTlas.pInstanceDescs.get(), Resource::State::NonPixelShader);
+        pList4->BuildRaytracingAccelerationStructure(&asDesc, 0, nullptr);
+        pContext->uavBarrier(mPhotonTlas.pTlas.get());
+
+        //logWarning(std::to_string(mpBlas->getElementCount()));
+    }
 }
 
 bool BDPT::renderRenderingUI(Gui::Widgets& widget)
@@ -680,10 +954,28 @@ bool BDPT::renderRenderingUI(Gui::Widgets& widget)
         widget.tooltip("Add the contribution of s>1 type to the final result.");
         mParams.flag |= s2 ? uint(BDPTFlags::s2) : 0;
 
-        runtimeDirty |= widget.checkbox("t == 1 connection", t1);
-        widget.tooltip("Add the contribution of t=1 type to the final result.");
-        mParams.flag |= t1 ? uint(BDPTFlags::t1) : 0;
+        runtimeDirty |= widget.checkbox("use Vertex Merge", mUseVertexMerge);
+        widget.tooltip("use VCM.");
+        mParams.flag |= mUseVertexMerge ? uint(BDPTFlags::useVertexMerge) : 0;
+
+        if (mUseVertexMerge) {
+            runtimeDirty |= widget.checkbox("temproal reuse", t1);
+            widget.tooltip("temproal reuse surfle");
+            mParams.flag |= t1 ? 0 : uint(BDPTFlags::t1);
+        }
+        else {
+            runtimeDirty |= widget.checkbox("use subspace", mUseSubspace);
+            widget.tooltip("use subspace BDPT");
+            mParams.flag |= mUseSubspace ? uint(BDPTFlags::useSubspaceBDPT) : 0;
+        }
+
+        runtimeDirty |= widget.checkbox("use subspace reservoir", mUseReservoir);
+        widget.tooltip("reservoir");
+        mParams.flag |= mUseReservoir ? uint(BDPTFlags::useReservoir) : 0;
     }
+
+    
+    
 
     if (auto group = widget.group("Spatiotemporal reuse"))
     {
@@ -1070,6 +1362,7 @@ void BDPT::updatePrograms()
     //if (!mpTracePass) mpTracePass = std::make_unique<TracePass>("tracePass", "", mpScene, kTracePassFilename, defines, globalTypeConformances);
     if (!mpTraceLightPath) mpTraceLightPath = std::make_unique<TracePass>("traceLightPath", "", mpScene, kTraceLightPathFilename, defines, globalTypeConformances);
     if (!mpTraceCameraPath) mpTraceCameraPath = std::make_unique<TracePass>("traceCameraPath", "", mpScene, kTraceCameraPathFilename, defines, globalTypeConformances);
+    if (!mpRISReuse) mpRISReuse = std::make_unique<CollectPass>(kSpatiotemporalReuseFilename, mpScene);
     /*
     if (mOutputNRDAdditionalData)
     {
@@ -1091,6 +1384,8 @@ void BDPT::updatePrograms()
     baseDesc.addTypeConformances(globalTypeConformances);
     baseDesc.setShaderModel(kShaderModel);
 
+    //if (!)
+
     if (!mpGeneratePaths)
     {
         Program::Desc desc = baseDesc;
@@ -1110,6 +1405,14 @@ void BDPT::updatePrograms()
         desc.addShaderLibrary(kSpatiotemporalReuseFilename).csEntry("main");
         mpSpatiotemporalReuse = ComputePass::create(desc, defines, false);
     }
+/*
+    if (!mpCullingPass)
+    {
+        Program::Desc desc = baseDesc;
+        desc.addShaderLibrary(kCullingPassFilename).csEntry("main");
+        mpCullingPass = ComputePass::create(desc, defines, false);
+    }
+*/
  
     // Perform program specialization.
     // Note that we must use set instead of add functions to replace any stale state.
@@ -1127,6 +1430,8 @@ void BDPT::updatePrograms()
     mpResolvePass->setVars(nullptr);
     mpReflectTypes->setVars(nullptr);
     mpSpatiotemporalReuse->setVars(nullptr);
+    //mpMergePass->setVars(nullptr);
+    //mpCullingPass->setVars(nullptr);
 
     mVarsChanged = true;
     mRecompile = false;
@@ -1158,7 +1463,8 @@ Program::DefineList BDPT::StaticParams::getDefines(const BDPT& owner) const
     defines.add("MIS_POWER_EXPONENT", std::to_string(misPowerExponent));
     defines.add("LIGHT_PASS_WIDTH", std::to_string(lightPassWidth));
     defines.add("LIGHT_PASS_HEIGHT", std::to_string(lightPassHeight));
-    defines.add("CANDIDATE_NUMBER", std::to_string(candidateNumber));
+    //defines.add("CANDIDATE_NUMBER", std::to_string(candidateNumber));
+    defines.add("LOG_SUBSPACE_SIZE", std::to_string(logSubspaceSize));
 
     // Sampling utilities configuration.
     FALCOR_ASSERT(owner.mpSampleGenerator);
@@ -1203,7 +1509,7 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
     desc.setShaderModel(kShaderModel);
     desc.setMaxPayloadSize(160); // This is conservative but the required minimum is 140 bytes.
     desc.setMaxAttributeSize(pScene->getRaytracingMaxAttributeSize());
-    desc.setMaxTraceRecursionDepth(1);
+    desc.setMaxTraceRecursionDepth(3);
     if (!pScene->hasProceduralGeometry()) desc.setPipelineFlags(RtPipelineFlags::SkipProceduralPrimitives);
 
     // Create ray tracing binding table.
@@ -1214,6 +1520,7 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
     // The miss shader doesn't need type conformances as it doesn't access any materials.
     pBindingTable->setRayGen(desc.addRayGen("rayGen", globalTypeConformances));
     pBindingTable->setMiss(kMissScatter, desc.addMiss("scatterMiss"));
+    //pBindingTable->setMiss(1, desc.addMiss("RISMiss"));
 
     // Specify hit group entry points for every combination of geometry and material type.
     // The code for each hit group gets specialized for the actual types it's operating on.
@@ -1228,6 +1535,8 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
         if (auto geometryIDs = pScene->getGeometryIDs(Scene::GeometryType::TriangleMesh, materialType); !geometryIDs.empty())
         {
             auto shaderID = desc.addHitGroup("scatterTriangleClosestHit", "scatterTriangleAnyHit", "", typeConformances, to_string(materialType));
+            //auto testRay = desc.addHitGroup("", "RISAnyHit", "", typeConformances, to_string(materialType));
+            //pBindingTable->setHitGroup(1, geometryIDs, testRay);
             pBindingTable->setHitGroup(kRayTypeScatter, geometryIDs, shaderID);
         }
 
@@ -1235,6 +1544,8 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
         if (auto geometryIDs = pScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh, materialType); !geometryIDs.empty())
         {
             auto shaderID = desc.addHitGroup("scatterDisplacedTriangleMeshClosestHit", "", "displacedTriangleMeshIntersection", typeConformances, to_string(materialType));
+            //auto testRay = desc.addHitGroup("", "RISAnyHit", "", typeConformances, to_string(materialType));
+            //pBindingTable->setHitGroup(1, geometryIDs, testRay);
             pBindingTable->setHitGroup(kRayTypeScatter, geometryIDs, shaderID);
         }
 
@@ -1242,6 +1553,8 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
         if (auto geometryIDs = pScene->getGeometryIDs(Scene::GeometryType::Curve, materialType); !geometryIDs.empty())
         {
             auto shaderID = desc.addHitGroup("scatterCurveClosestHit", "", "curveIntersection", typeConformances, to_string(materialType));
+            //auto testRay = desc.addHitGroup("", "RISAnyHit", "", typeConformances, to_string(materialType));
+            //pBindingTable->setHitGroup(1, geometryIDs, testRay);
             pBindingTable->setHitGroup(kRayTypeScatter, geometryIDs, shaderID);
         }
 
@@ -1249,11 +1562,16 @@ BDPT::TracePass::TracePass(const std::string& name, const std::string& passDefin
         if (auto geometryIDs = pScene->getGeometryIDs(Scene::GeometryType::SDFGrid, materialType); !geometryIDs.empty())
         {
             auto shaderID = desc.addHitGroup("scatterSdfGridClosestHit", "", "sdfGridIntersection", typeConformances, to_string(materialType));
+            //auto testRay = desc.addHitGroup("", "RISAnyHit", "", typeConformances, to_string(materialType));
+            //pBindingTable->setHitGroup(1, geometryIDs, testRay);
             pBindingTable->setHitGroup(kRayTypeScatter, geometryIDs, shaderID);
         }
     }
 
+    //auto shaderID = desc.addHitGroup("scatterTriangleClosestHit", "scatterTriangleAnyHit", "", typeConformances, to_string(materialType));
+    
     pProgram = RtProgram::create(desc, defines);
+    
 }
 
 void BDPT::TracePass::prepareProgram(const Program::DefineList& defines)
@@ -1262,6 +1580,7 @@ void BDPT::TracePass::prepareProgram(const Program::DefineList& defines)
     pProgram->setDefines(defines);
     if (!passDefine.empty()) pProgram->addDefine(passDefine);
     pVars = RtProgramVars::create(pProgram, pBindingTable);
+    //logWarning(std::to_string(pVars->getRayTypeCount()));
 }
 
 void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& renderData)
@@ -1313,8 +1632,108 @@ void BDPT::prepareResources(RenderContext* pRenderContext, const RenderData& ren
     //if (!mpDstCameraPathsVertexsReservoirBuffer) mpDstCameraPathsVertexsReservoirBuffer = Buffer::createStructured(var["DstCameraPathsVertexsReservoirBuffer"], cameraVertexElementCount, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     if (!mpOutput) mpOutput = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
 
+    uint subspaceSize = 1 << mStaticParams.logSubspaceSize;
+    if (!mpSubspaceWeight[0]) {
+        mpSubspaceWeight[0] = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpMergePass["subspaceWeight"] = mpSubspaceWeight[0];
+    }
+    if (!mpSubspaceWeight[1]) {
+        mpSubspaceWeight[1] = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpMergePass["nextSubspaceWeight"] = mpSubspaceWeight[1];
+        mpPrefixSumPass["nextSubspaceWeight"] = mpSubspaceWeight[1];
+    }
+    if (!mpSubspaceCount[0]) {
+        mpSubspaceCount[0] = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpMergePass["subspaceCount"] = mpSubspaceCount[0];
+    }
+    if (!mpSubspaceCount[1]) {
+        mpSubspaceCount[1] = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpMergePass["totalCount"] = mpSubspaceCount[1];
+        mpPrefixSumPass["totalCount"] = mpSubspaceCount[1];
+    }
+    
+    if (!mpPrefixOfWeight) {
+        mpPrefixOfWeight = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["prefixSum"] = mpPrefixOfWeight;
+        mpMergePass["prefixSum"] = mpPrefixOfWeight;
+    }
+    
+    if (!mpSumOfWeight) {
+        mpSumOfWeight = Texture::create1D(subspaceSize, ResourceFormat::R32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["sumWeight"] = mpSumOfWeight;
+        mpMergePass["sumWeight"] = mpSumOfWeight;
+    }
+
+    if (!mpPrefixOfCount) {
+        mpPrefixOfCount = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["prefixSumOfCount"] = mpPrefixOfCount;
+    }
+
+    if (!mpSumOfCount) {
+        mpSumOfCount = Texture::create1D(subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["sumCount"] = mpSumOfCount;
+    }
+
+    if (!mpSubspaceReservoir) {
+        mpSubspaceReservoir = std::make_shared<subspaceReservoir>(subspaceSize);
+        mpSubspaceReservoir->clear(pRenderContext);
+    }
+    if (!mpSubspaceSecondaryMoment) {
+        mpSubspaceSecondaryMoment = Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpMergePass["subspaceSecondaryMoment"] = mpSubspaceSecondaryMoment;
+        mpPrefixSumPass["subspaceSecondaryMoment"] = mpSubspaceSecondaryMoment;
+    }
+    if (!mpPrefixOfSecondaryMoment) {
+        mpPrefixOfSecondaryMoment= Texture::create2D(subspaceSize, subspaceSize, ResourceFormat::R32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["prefixSumOfSecondaryMoment"] = mpPrefixOfSecondaryMoment;
+    }
+    if (!mpSumOfSecondaryMoment) {
+        mpSumOfSecondaryMoment = Texture::create1D(subspaceSize, ResourceFormat::R32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["sumSecondaryMoment"] = mpSumOfSecondaryMoment;
+    }
+    if (!mpMaxVariance) {
+        mpMaxVariance = Texture::create1D(subspaceSize, ResourceFormat::R32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+        mpPrefixSumPass["maxVariance"] = mpMaxVariance;
+    }
+    /*
+    if (!mpGatherPointVbuffer) mpGatherPointVbuffer = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    if (!mpGatherPointThp) mpGatherPointThp = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    if (!mpGatherPointDir) mpGatherPointDir = Texture::create2D(mParams.frameDim.x, mParams.frameDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    uint32_t hashSize = 1 << mStaticParams.cullingHashBufferSizeBytes;
+    hashSize = static_cast<uint>(sqrt(hashSize));
+    if (!mpHashBuffer) mpHashBuffer = Texture::create2D(hashSize, hashSize, ResourceFormat::R8Uint, 1, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+
+    // Caustic
+    {
+        mpCausticBuffers.maxSize = lightVertexElementCount;
+        if (!mpCausticBuffers.infoFlux) mpCausticBuffers.infoFlux = Buffer::createStructured(sizeof(float4), mpCausticBuffers.maxSize);
+        if (!mpCausticBuffers.infoDir) mpCausticBuffers.infoDir = Buffer::createStructured(sizeof(float4), mpCausticBuffers.maxSize, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+        if (!mpCausticBuffers.aabb) mpCausticBuffers.aabb = Buffer::createStructured(sizeof(D3D12_RAYTRACING_AABB), mpCausticBuffers.maxSize);
+    }
+
+    // Global
+    {
+        mpGlobalBuffers.maxSize = lightVertexElementCount;
+        if (!mpGlobalBuffers.infoFlux) mpGlobalBuffers.infoFlux = Buffer::createStructured(sizeof(float4), mpGlobalBuffers.maxSize);
+        if (!mpGlobalBuffers.infoDir) mpGlobalBuffers.infoDir = Buffer::createStructured(sizeof(float4), mpGlobalBuffers.maxSize, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
+        if (!mpGlobalBuffers.aabb) mpGlobalBuffers.aabb = Buffer::createStructured(sizeof(D3D12_RAYTRACING_AABB), mpGlobalBuffers.maxSize);
+    }
+*/
+    
     if (!mpSortPass) mpSortPass = std::make_unique<Bitonic64Sort>(mpLightPathsIndexBuffer, 0);
     if (!mpTreeBuilder) mpTreeBuilder = std::make_unique<VertexTreeBuilder>(mpLightPathsIndexBuffer, mpLightPathsVertexsPositionBuffer, lightVertexElementCount);
+    
+    if (!mpPrevGatherPoints) mpPrevGatherPoints = std::make_shared<GatherPointInfo>(mParams.frameDim.x, mParams.frameDim.y);
+    if (!mpGatherPoints) mpGatherPoints = std::make_shared<GatherPointInfo>(mParams.frameDim.x, mParams.frameDim.y);
+    
+    if (!mpPairs) mpPairs = std::make_shared<SamplePairs>(cameraVertexElementCount);
+    if (!mpPrevPairs) mpPrevPairs = std::make_shared<SamplePairs>(cameraVertexElementCount);
+    //if (!mpAABB) mpAABB = Buffer::createStructured(sizeof(D3D12_RAYTRACING_AABB), cameraVertexElementCount);
+
+    //if (!mpPathPos) mpPathPos = Texture::create3D(mParams.frameDim.x, mParams.frameDim.y, mStaticParams.maxSurfaceBounces, ResourceFormat::RGBA32Uint, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    //if (!mpPathRadiance) mpPathRadiance = Texture::create3D(mParams.frameDim.x, mParams.frameDim.y, mStaticParams.maxSurfaceBounces, ResourceFormat::RGBA32Float, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+    //if (!mpPathHitInfo) mpPathHitInfo = Texture::create3D(mParams.frameDim.x, mParams.frameDim.y, mStaticParams.maxSurfaceBounces, ResourceFormat::RGBA32Uint, 1, nullptr, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess);
+
     //if (!mpCameraPathsIndexBuffer) mpCameraPathsIndexBuffer = Buffer::createStructured(var["CameraPathsIndexBuffer"], cameraVertexElementCount);
     //if (!mpMCounter) mpMCounter = Buffer::createStructured(var["MCounter"], mStaticParams.maxSurfaceBounces + 2, Resource::BindFlags::ShaderResource | Resource::BindFlags::UnorderedAccess, Buffer::CpuAccess::None, nullptr, false);
     //pRenderContext->clearUAV(mpMCounter->getUAV().get(), zero4);
@@ -1349,8 +1768,86 @@ void BDPT::preparePathTracer(const RenderData& renderData)
 
     // Bind resources.
     auto var = mpPathTracerBlock->getRootVar();
+    float3 dimension = mpScene->getSceneBounds().maxPoint - mpScene->getSceneBounds().minPoint;
     var["corner"] = mpScene->getSceneBounds().minPoint;
-    var["dimension"] = mpScene->getSceneBounds().maxPoint - mpScene->getSceneBounds().minPoint;
+    var["dimension"] = dimension;
+    radius = 0.005 * sqrt(dimension.x * dimension.x + dimension.y * dimension.y + dimension.z * dimension.z);
+    var["globalRadius"] = radius;
+
+    if (mUseVertexMerge) {
+        var["InputFluxAndNumber"] = mpPrevGatherPoints->mpFluxAndNumber;
+        var["InputNormalAndRadii"] = mpPrevGatherPoints->mpNormalAndRadii;
+        var["InputPosAndNewRadii"] = mpPrevGatherPoints->mpPosAndNewRadii;
+        var["InputIteration"] = mpPrevGatherPoints->mpIteration;
+
+        var["OutputFluxAndNumber"] = mpGatherPoints->mpFluxAndNumber;
+        var["OutputNormalAndRadii"] = mpGatherPoints->mpNormalAndRadii;
+        var["OutputPosAndNewRadii"] = mpGatherPoints->mpPosAndNewRadii;
+        var["OutputIteration"] = mpGatherPoints->mpIteration;
+    }
+    
+    //mpScene->getParameterBlock()->acc
+    
+    if (mVarsChanged) {
+        var["SubspaceWeight"] = mpSubspaceWeight[0];
+        var["prevSubspaceWeight"] = mpSubspaceWeight[1];
+        var["SubspaceCount"] = mpSubspaceCount[0];
+        var["prefixSum"] = mpPrefixOfWeight;
+        var["weightSum"] = mpSumOfWeight;
+        var["countSum"] = mpSumOfCount;
+        var["prefixSumOfCount"] = mpPrefixOfCount;
+
+        var["SubspaceSecondaryMoment"] = mpSubspaceSecondaryMoment;
+        var["prefixSumOfSecondaryMoment"] = mpPrefixOfSecondaryMoment;
+        var["secondaryMomentSum"] = mpSumOfSecondaryMoment;
+
+        var["maxVariance"] = mpMaxVariance;
+
+        mpSubspaceReservoir->bind(var);
+    }
+
+    
+    //var["motionVec"] = renderData.getTexture(kInputMotionVectors);
+    //var["hitPointAABB"] = mpAABB;
+
+    /*
+    if (mVarsChanged) {
+        var["gatherPointVbuffer"] = mpGatherPointVbuffer;
+        var["gatherPointThp"] = mpGatherPointThp;
+        var["gatherPointDir"] = mpGatherPointDir;
+        var["hashBuffer"] = mpHashBuffer;
+    }
+    
+    radius = 0.005 * sqrt(dimension.x * dimension.x + dimension.y * dimension.y + dimension.z * dimension.z);
+    // 
+
+    uint hashSize = 1 << mStaticParams.cullingHashBufferSizeBytes;
+    var["gHashScaleFactor"] = 1.0f / (radius * 2);
+    var["gHashSize"] = hashSize;
+    var["gYExtend"] = static_cast<uint>(sqrt(hashSize));
+    var["gGlobalRadius"] = radius;
+    */
+
+    /*
+    var["samplePositionI"] = mpPrevPairs->samplePosition;
+    var["hitPointPositionI"] = mpPrevPairs->hitPointPosition;
+    var["normalI"] = mpPrevPairs->normal;
+    var["radianceI"] = mpPrevPairs->radiance;
+    var["ReservoirI"] = mpPrevPairs->reservoir;
+
+    var["samplePositionO"] = mpPairs->samplePosition;
+    var["hitPointPositionO"] = mpPairs->hitPointPosition;
+    var["normalO"] = mpPairs->normal;
+    var["radianceO"] = mpPairs->radiance;
+    var["ReservoirO"] = mpPairs->reservoir;
+    */
+    /*
+    if (mVarsChanged) {
+        var["pathPos"] = mpPathPos;
+        var["pathRadiance"] = mpPathRadiance;
+        var["pathHitInfo"] = mpPathHitInfo;
+    }
+    */
     setShaderData(var, renderData);
 }
 
@@ -1366,6 +1863,7 @@ void BDPT::setShaderData(const ShaderVar& var, const RenderData& renderData, boo
         var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
         var["LightPathsIndexBuffer"] = mpLightPathsIndexBuffer;
         var["LightPathsVertexsPositionBuffer"] = mpLightPathsVertexsPositionBuffer;
+        
         var["nodes"] = mpTreeBuilder->getTree();
         //var["CameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
         //var["CameraPathsIndexBuffer"] = mpCameraPathsIndexBuffer;
@@ -1438,18 +1936,51 @@ void BDPT::spatiotemporalReuse(RenderContext* pRenderContext, const RenderData& 
     FALCOR_PROFILE("spatiotemporalReuse");
 
     auto var = mpSpatiotemporalReuse->getRootVar()["CB"]["gSpatiotemproalReuse"];
-    var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
+    //var["LightPathsVertexsBuffer"] = mpLightPathVertexBuffer;
     //var["SrcCameraPathsVertexsReservoirBuffer"] = mpCameraPathsVertexsReservoirBuffer;
     //var["DstCameraPathsVertexsReservoirBuffer"] = mpDstCameraPathsVertexsReservoirBuffer;
     var["output"] = mpOutput;
 
-    var["params"].setBlob(mParams);
+    //var["params"].setBlob(mParams);
+    //Texture3D<uint4> pathPos;       // xyz := pos, w := index
+    //Texture3D<float4> pathRadiance; // xyz := radiance, w := de;
+    //Texture3D<uint4> pathHitInfo;
+   // var["pathPos"] =
+    if (mVarsChanged) {
+        var["pathPos"] = mpPathPos;
+        var["pathRadiance"] = mpPathRadiance;
+        var["pathHitInfo"] = mpPathHitInfo;
+    }
 
     var["outputColor"] = renderData.getTexture(kOutputColor);
 
     mpSpatiotemporalReuse["gScene"] = mpScene->getParameterBlock();
 
     mpSpatiotemporalReuse->execute(pRenderContext, { mParams.frameDim, 1u });
+}
+
+void BDPT::buildSubspaceWeightMatrix(RenderContext* pRenderContext, const RenderData& renderData) {
+    //mpMergePass["output"] = renderData.getTexture(kOutputColor);
+    mpMergePass["CB"]["frameCount"] = 0;// mParams.frameCount;
+    uint groupSize = 1 << (mStaticParams.logSubspaceSize - 1);
+    uint texSize = groupSize << 1;
+    mpMergePass->execute(pRenderContext, { texSize,texSize,1u });
+    pRenderContext->uavBarrier(mpSubspaceWeight[1].get());
+    pRenderContext->uavBarrier(mpSubspaceCount[1].get());
+    pRenderContext->uavBarrier(mpSubspaceSecondaryMoment.get());
+
+    //mpSubspaceWeightComputeState->setProgram(mpPrefixSumPass);
+    //pRenderContext->dispatch(mpSubspaceWeightComputeState.get(), mpPrefixSumVar.get(), { 1024u,1u,1u });
+    mpPrefixSumPass["CB"]["frameCount"] = mParams.frameCount;
+    mpPrefixSumPass->execute(pRenderContext, uint3(groupSize, texSize, 1u));
+    pRenderContext->uavBarrier(mpPrefixOfWeight.get());
+    pRenderContext->uavBarrier(mpSumOfWeight.get());
+    pRenderContext->uavBarrier(mpPrefixOfCount.get());
+    pRenderContext->uavBarrier(mpSumOfCount.get());
+    pRenderContext->uavBarrier(mpSubspaceSecondaryMoment.get());
+    pRenderContext->uavBarrier(mpPrefixOfSecondaryMoment.get());
+    pRenderContext->uavBarrier(mpSumOfSecondaryMoment.get());
+    pRenderContext->uavBarrier(mpMaxVariance.get());
 }
 
 void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData, TracePass& tracePass, uint2 dim)
@@ -1476,6 +2007,9 @@ void BDPT::tracePass(RenderContext* pRenderContext, const RenderData& renderData
 
     // Bind the path tracer.
     var["gPathTracer"] = mpPathTracerBlock;
+    bool tlasValid = var["gHitPointAS"].setSrv(mPhotonTlas.pSrv);
+    //mPhotonTlas.pTlas->
+    //logWarning(std::to_string(tlasValid));
 
     // Full screen dispatch.
     mpScene->raytrace(pRenderContext, tracePass.pProgram.get(), tracePass.pVars, uint3(dim, 1));
@@ -1561,8 +2095,19 @@ void BDPT::endFrame(RenderContext* pRenderContext, const RenderData& renderData)
     //uint32_t zero = 0;
     //pRenderContext->clearUAV(mpCameraPathsVertexsReservoirBuffer->getUAV().get(), zero4);
     pRenderContext->clearUAV(mpOutput->getUAV().get(), zero4);
-
+    //std::swap(mpPairs, mpPrevPairs);
+    //mpPairs->clear(pRenderContext);
+    if (mUseVertexMerge) {
+        std::swap(mpPrevGatherPoints, mpGatherPoints);
+    }
+    
+    pRenderContext->clearUAV(mpSubspaceWeight[0]->getUAV().get(), zero4);
+    pRenderContext->clearUAV(mpSubspaceCount[0]->getUAV().get(), zero4);
+    //mpGatherPoints->clear(pRenderContext);
+    //pRenderContext->clearUAV(mpHashBuffer->getUAV().get(), zero4);
 
     mVarsChanged = false;
+    //mpScene->getMesh(0).getTriangleCount
+    //logWarning(std::to_string(mpScene-> ));
     mParams.frameCount++;
 }

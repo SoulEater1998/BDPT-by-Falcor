@@ -25,8 +25,9 @@ VertexTreeBuilder::VertexTreeBuilder(Buffer::SharedPtr _KeyIndexBuffer, Buffer::
     GenInternalLevelCS["nodes"] = Nodes;
 }
 
-void VertexTreeBuilder::update(uint counter) {
+void VertexTreeBuilder::update(uint counter, float m_radius) {
     realLeafNodesNum = counter;
+    radius = m_radius;
     leafNodesNum = counter == 0 ? 0 : 1 << int(ceil(log2((double)counter)));
     treeLevels = uint(ceil(log2((double)counter))) + 1;
     nodesNum = leafNodesNum << 1;
@@ -36,6 +37,7 @@ void VertexTreeBuilder::GenLevelZero(RenderContext* pRenderContext) {
     GenLevelZeroCS["CSConstants"]["numLeafNodes"] = leafNodesNum;
     GenLevelZeroCS["CSConstants"]["numLevels"] = treeLevels;
     GenLevelZeroCS["CSConstants"]["counter"] = realLeafNodesNum;
+    GenLevelZeroCS["CSConstants"]["radius"] = radius;
     
     GenLevelZeroCS->execute(pRenderContext, leafNodesNum, 1);
 }
